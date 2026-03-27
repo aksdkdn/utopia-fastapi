@@ -2,7 +2,6 @@ import uuid
 from pydantic import BaseModel, EmailStr, Field
 from datetime import datetime
 from typing import Optional
-from models.party import PartyStatusEnum
 
 
 # ─── Auth ─────────────────────────────────────────────────────────────────
@@ -73,7 +72,7 @@ class PartyOut(BaseModel):
     leader_id: Optional[uuid.UUID]
     service_id: Optional[uuid.UUID]
     title: str
-    status: Optional[PartyStatusEnum]
+    status: Optional[str]          # ← PartyStatusEnum 대신 str로 변경
     host_nickname: Optional[str] = None
     service_name: Optional[str] = None
     category_name: Optional[str] = None
@@ -98,7 +97,10 @@ class NotificationOut(BaseModel):
     id: uuid.UUID
     user_id: Optional[uuid.UUID]
     type: Optional[str]
-    content: Optional[str]
+    title: Optional[str]
+    message: Optional[str]
+    reference_type: Optional[str]
+    reference_id: Optional[uuid.UUID]
     is_read: Optional[bool]
     created_at: Optional[datetime]
 

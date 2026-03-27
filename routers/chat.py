@@ -6,11 +6,11 @@ from datetime import datetime
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 import redis.asyncio as aioredis
 from core.config import settings
 from core.database import get_db
-from models.party import Party, PartyMember
-from models.chat import ChatRoom
+from models.party import Party, PartyMember, PartyChat
 from models.user import User
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -22,14 +22,14 @@ OLLAMA_URL = settings.OLLAMA_URL
 OLLAMA_MODEL = settings.OLLAMA_MODEL
 
 
-def warn_key(room_id: str, user_id: str) -> str:
-    return f"warn:{room_id}:{user_id}"
+def warn_key(party_id: str, user_id: str) -> str:
+    return f"warn:{party_id}:{user_id}"
 
-def redis_key(room_id: str) -> str:
-    return f"chat:room:{room_id}:messages"
+def redis_msg_key(party_id: str) -> str:
+    return f"chat:party:{party_id}:messages"
 
-def blocked_key(room_id: str, user_id: str) -> str:
-    return f"blocked:{room_id}:{user_id}"
+def blocked_key(party_id: str, user_id: str) -> str:
+    return f"blocked:{party_id}:{user_id}"
 
 
 async def check_message(content: str) -> dict:
@@ -67,20 +67,20 @@ class ConnectionManager:
     def __init__(self):
         self.active: dict[str, list[WebSocket]] = {}
 
-    async def connect(self, room_id: str, ws: WebSocket):
+    async def connect(self, party_id: str, ws: WebSocket):
         await ws.accept()
-        self.active.setdefault(room_id, []).append(ws)
+        self.active.setdefault(party_id, []).append(ws)
 
-    def disconnect(self, room_id: str, ws: WebSocket):
-        if room_id in self.active:
+    def disconnect(self, party_id: str, ws: WebSocket):
+        if party_id in self.active:
             try:
-                self.active[room_id].remove(ws)
+                self.active[party_id].remove(ws)
             except ValueError:
                 pass
 
-    async def broadcast(self, room_id: str, message: dict):
+    async def broadcast(self, party_id: str, message: dict):
         msg_str = json.dumps(message, ensure_ascii=False)
-        for ws in list(self.active.get(room_id, [])):
+        for ws in list(self.active.get(party_id, [])):
             try:
                 await ws.send_text(msg_str)
             except Exception:
@@ -96,37 +96,47 @@ class ConnectionManager:
 manager = ConnectionManager()
 
 
-async def moderate_in_background(room_id: str, user_id: str, content: str, ws: WebSocket):
+async def moderate_in_background(
+    party_id: str, user_id: str, content: str, ws: WebSocket, db: AsyncSession
+):
     moderation = await check_message(content)
 
     if moderation["severe"]:
-        await redis_client.set(blocked_key(room_id, user_id), "1", ex=REDIS_TTL)
+        await redis_client.set(blocked_key(party_id, user_id), "1", ex=REDIS_TTL)
+        await db.execute(
+            PartyChat.__table__.update()
+            .where(PartyChat.party_id == uuid.UUID(party_id))
+            .where(PartyChat.sender_id == uuid.UUID(user_id))
+            .where(PartyChat.is_flagged == False)  # noqa
+            .values(is_flagged=True, flag_reason=moderation["reason"], moderation_status="blocked")
+        )
+        await db.commit()
         await manager.send_personal(ws, {
             "type": "error",
             "content": f"🚫 심각한 욕설이 감지되어 차단되었습니다. ({moderation['reason']})",
             "created_at": datetime.now().isoformat(),
         })
-        await redis_client.rpop(redis_key(room_id))
-        await manager.broadcast(room_id, {
+        await redis_client.rpop(redis_msg_key(party_id))
+        await manager.broadcast(party_id, {
             "type": "system",
             "content": "부적절한 메시지가 삭제되었습니다.",
             "created_at": datetime.now().isoformat(),
         })
 
     elif moderation["violation"]:
-        key = warn_key(room_id, user_id)
+        key = warn_key(party_id, user_id)
         warn_count = await redis_client.incr(key)
         await redis_client.expire(key, REDIS_TTL)
 
         if warn_count >= 3:
-            await redis_client.set(blocked_key(room_id, user_id), "1", ex=REDIS_TTL)
+            await redis_client.set(blocked_key(party_id, user_id), "1", ex=REDIS_TTL)
             await manager.send_personal(ws, {
                 "type": "error",
                 "content": "🚫 경고 3회 누적으로 채팅이 차단되었습니다.",
                 "created_at": datetime.now().isoformat(),
             })
-            await redis_client.rpop(redis_key(room_id))
-            await manager.broadcast(room_id, {
+            await redis_client.rpop(redis_msg_key(party_id))
+            await manager.broadcast(party_id, {
                 "type": "system",
                 "content": "부적절한 메시지가 삭제되었습니다.",
                 "created_at": datetime.now().isoformat(),
@@ -139,38 +149,37 @@ async def moderate_in_background(room_id: str, user_id: str, content: str, ws: W
             })
 
 
-# ✅ Fix: party_id 타입 uuid.UUID로 변경
-@router.post("/rooms/{party_id}")
-async def get_or_create_room(party_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
-    party = await db.get(Party, party_id)
-    if not party:
-        raise HTTPException(status_code=404, detail="파티를 찾을 수 없습니다.")
+@router.get("/parties/{party_id}/messages")
+async def get_messages(party_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+    cached = await redis_client.lrange(redis_msg_key(str(party_id)), 0, -1)
+    if cached:
+        return [json.loads(m) for m in cached]
 
-    result = await db.execute(select(ChatRoom).where(ChatRoom.party_id == party_id))
-    room = result.scalar_one_or_none()
+    result = await db.execute(
+        select(PartyChat)
+        .where(PartyChat.party_id == party_id, PartyChat.is_deleted == False)  # noqa
+        .order_by(PartyChat.created_at.desc())
+        .limit(100)
+    )
+    chats = result.scalars().all()
+    return [
+        {
+            "type": "message",
+            "party_id": str(c.party_id),
+            "user_id": str(c.sender_id),
+            "content": c.message,
+            "created_at": c.created_at.isoformat(),
+        }
+        for c in reversed(chats)
+    ]
 
-    if not room:
-        room = ChatRoom(party_id=party_id)
-        db.add(room)
-        await db.commit()
-        await db.refresh(room)
 
-    # ✅ Fix: chat_room_id → id (UUID)
-    return {"chat_room_id": str(room.id), "party_id": str(party_id)}
-
-
-@router.get("/rooms/{room_id}/messages")
-async def get_messages(room_id: str):
-    messages = await redis_client.lrange(redis_key(room_id), 0, -1)
-    return [json.loads(m) for m in messages]
-
-
-@router.get("/rooms/{party_id}/info")
-async def get_room_info(party_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
+@router.get("/parties/{party_id}/info")
+async def get_party_info(party_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
         select(PartyMember, User)
         .join(User, PartyMember.user_id == User.id)
-        .where(PartyMember.party_id == party_id)
+        .where(PartyMember.party_id == party_id, PartyMember.status == "active")
     )
     rows = result.all()
     party = await db.get(Party, party_id)
@@ -182,24 +191,22 @@ async def get_room_info(party_id: uuid.UUID, db: AsyncSession = Depends(get_db))
         members.append({
             "user_id": str(user.id),
             "nickname": user.nickname,
-            # ✅ Fix: host_id → leader_id
-            "role": "리더" if user.id == party.leader_id else "멤버",
-            "payment_status": member.payment_status,
+            "role": member.role,
+            "status": member.status,
         })
     return {"party_id": str(party_id), "title": party.title, "members": members}
 
 
-# ✅ Fix: room_id를 str 타입으로 (UUID 문자열)
-@router.websocket("/ws/{room_id}")
+@router.websocket("/ws/{party_id}")
 async def websocket_chat(
-    room_id: str,
+    party_id: str,
     ws: WebSocket,
     nickname: str = "익명",
     user_id: str = "guest",
+    db: AsyncSession = Depends(get_db),
 ):
-    await manager.connect(room_id, ws)
-
-    await manager.broadcast(room_id, {
+    await manager.connect(party_id, ws)
+    await manager.broadcast(party_id, {
         "type": "system",
         "content": f"{nickname}님이 입장했습니다.",
         "created_at": datetime.now().isoformat(),
@@ -209,7 +216,7 @@ async def websocket_chat(
         while True:
             data = await ws.receive_text()
 
-            is_blocked = await redis_client.get(blocked_key(room_id, user_id))
+            is_blocked = await redis_client.get(blocked_key(party_id, user_id))
             if is_blocked:
                 await manager.send_personal(ws, {
                     "type": "error",
@@ -218,28 +225,41 @@ async def websocket_chat(
                 })
                 continue
 
+            now = datetime.now().isoformat()
             message = {
                 "type": "message",
-                "room_id": room_id,
+                "party_id": party_id,
                 "user_id": user_id,
                 "nickname": nickname,
                 "content": data,
-                "created_at": datetime.now().isoformat(),
+                "created_at": now,
             }
 
-            key = redis_key(room_id)
+            key = redis_msg_key(party_id)
             await redis_client.rpush(key, json.dumps(message, ensure_ascii=False))
             await redis_client.ltrim(key, -200, -1)
             await redis_client.expire(key, REDIS_TTL)
-            await manager.broadcast(room_id, message)
+
+            try:
+                chat = PartyChat(
+                    party_id=uuid.UUID(party_id),
+                    sender_id=uuid.UUID(user_id),
+                    message=data,
+                )
+                db.add(chat)
+                await db.commit()
+            except Exception:
+                await db.rollback()
+
+            await manager.broadcast(party_id, message)
 
             asyncio.create_task(
-                moderate_in_background(room_id, user_id, data, ws)
+                moderate_in_background(party_id, user_id, data, ws, db)
             )
 
     except WebSocketDisconnect:
-        manager.disconnect(room_id, ws)
-        await manager.broadcast(room_id, {
+        manager.disconnect(party_id, ws)
+        await manager.broadcast(party_id, {
             "type": "system",
             "content": f"{nickname}님이 퇴장했습니다.",
             "created_at": datetime.now().isoformat(),
