@@ -8,7 +8,7 @@ from core.database import get_db
 from core.security import get_current_user, require_user
 from models.party import Party, PartyMember, Service
 from models.user import User
-from schemas.schemas import PartyCreate, PartyOut, PartyListOut, MessageOut, ServiceOut, CategoryOut
+from schemas import PartyCreate, PartyOut, PartyListOut, MessageOut, ServiceOut, CategoryOut
 
 router = APIRouter(prefix="/parties", tags=["parties"])
 
