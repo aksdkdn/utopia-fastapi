@@ -3,6 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from core.config import settings
 from routers import auth, parties, notifications, chat, captcha
 
+from core.database import engine, Base
+from models.user import User
+
 app = FastAPI(title="Party-Up API", description="파티업 백엔드 API", version="1.0.0")
 
 app.add_middleware(
@@ -13,11 +16,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(auth.router, prefix="/api")
-app.include_router(parties.router, prefix="/api")
-app.include_router(notifications.router, prefix="/api")
-app.include_router(chat.router, prefix="/api")
+app.include_router(auth.router)
+app.include_router(parties.router)
+app.include_router(notifications.router)
+app.include_router(chat.router)
 app.include_router(captcha.router, prefix="/api/captcha", tags=["Captcha"])
+
+
+@app.on_event("startup")
+async def on_startup():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
 
 
 @app.get("/api/health")
