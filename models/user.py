@@ -46,4 +46,13 @@ class User(Base):
 
     hosted_parties: Mapped[list["Party"]] = relationship("Party", back_populates="host")  # noqa
     party_members: Mapped[list["PartyMember"]] = relationship("PartyMember", back_populates="user")  # noqa
-    notifications: Mapped[list["Notification"]] = relationship("Notification", back_populates="user")  # noqa
+    notifications: Mapped[list["Notification"]] = relationship(
+        "Notification",
+        back_populates="user",
+        foreign_keys="Notification.user_id",
+    )
+
+    created_notifications: Mapped[list["Notification"]] = relationship(
+        "Notification",
+        foreign_keys="Notification.created_by",
+    )

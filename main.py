@@ -22,14 +22,14 @@ app.include_router(notifications.router)
 app.include_router(chat.router)
 app.include_router(captcha.router, prefix="/api/captcha", tags=["Captcha"])
 
-
+# 서버 실행 시 테이블 없을 경우 DB자동생성
 @app.on_event("startup")
 async def on_startup():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
 
-
+# 헬스체크
 @app.get("/api/health")
 async def health():
     return {"status": "ok"}

@@ -1,7 +1,6 @@
 import uuid
 from pydantic import BaseModel, Field
 from typing import Optional
-from models.party import PartyStatusEnum
 
 
 class PartyCreate(BaseModel):
@@ -14,7 +13,7 @@ class PartyOut(BaseModel):
     leader_id: Optional[uuid.UUID]
     service_id: Optional[uuid.UUID]
     title: str
-    status: Optional[PartyStatusEnum]
+    status: str
     host_nickname: Optional[str] = None
     service_name: Optional[str] = None
     category_name: Optional[str] = None

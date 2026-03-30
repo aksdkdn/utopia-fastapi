@@ -3,7 +3,7 @@ from .user import UserResponse
 from .service import ServiceOut, CategoryOut
 from .party import PartyCreate, PartyOut, PartyListOut
 from .notification import NotificationOut
-from .common import MessageOut
+from .chat import MessageOut
 
 __all__ = [
     "UserCreate",

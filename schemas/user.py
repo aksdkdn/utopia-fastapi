@@ -12,6 +12,8 @@ class UserResponse(BaseModel):
 
 # 마이페이지 - 프로필
 class MyPageProfileResponse(BaseModel):
+    email: str
     nickname: str
+    phone : str
 
     model_config = {"from_attributes": True}
