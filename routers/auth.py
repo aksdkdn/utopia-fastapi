@@ -1,5 +1,6 @@
 import random
 import uuid
+from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status, Response, Cookie, Request
@@ -12,19 +13,21 @@ from core.config import settings
 from core.database import get_db
 from core.redis_client import redis_client
 from models.user import User
+from models.refresh_token import RefreshToken
 from schemas import UserCreate, UserOut, UserLogin, UserResponse
 from services.auth_service import (
     get_password_hash,
     verify_password,
     create_access_token,
-    create_refresh_token,
     decode_access_token,
-    decode_refresh_token,
+    rotate_refresh_token,
+    handle_refresh_token_reuse,
     set_access_token_cookie,
     set_refresh_token_cookie,
     clear_access_token_cookie,
     clear_refresh_token_cookie,
     issue_tokens_and_save,
+    hash_refresh_token,
 )
 from services.oauth_service import (
     get_google_access_token, get_google_user_info,
@@ -51,22 +54,59 @@ def get_email_auth_key(email: str) -> str:
     return f"email_auth:{email}"
 
 
-# ─── 토큰 재발급 ──────────────────────────────────────────────────
+# ─── Refresh token──────────────────────────────────────────────────
 @router.post("/refresh")
-async def refresh_token_api(request: Request, response: Response):
+async def refresh_token_api(
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
     refresh_token = request.cookies.get("refresh_token")
     if not refresh_token:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="refresh token이 없습니다.")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="refresh token이 없습니다.",
+        )
 
-    payload = decode_refresh_token(refresh_token)
-    user_id_str = payload.get("sub")
-    if not user_id_str:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="refresh token에 사용자 정보가 없습니다.")
+    token_hash = hash_refresh_token(refresh_token)
 
-    new_access_token = create_access_token(data={"sub": user_id_str})
+    result = await db.execute(
+        select(RefreshToken).where(RefreshToken.token_hash == token_hash)
+    )
+    token_row = result.scalar_one_or_none()
+
+    if not token_row:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="유효하지 않은 refresh token입니다.",
+        )
+
+    if token_row.revoked_at is not None:
+        await handle_refresh_token_reuse(db, token_row)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="재사용된 refresh token이 감지되어 모든 세션이 종료되었습니다.",
+        )
+
+    if token_row.expires_at <= datetime.now(timezone.utc):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="만료된 refresh token입니다.",
+        )
+
+    new_access_token = create_access_token(data={"sub": str(token_row.user_id)})
+
+    new_refresh_token = await rotate_refresh_token(
+        db=db,
+        old_token_row=token_row,
+        user_agent=request.headers.get("user-agent"),
+        ip_address=request.client.host if request.client else None,
+    )
+
     set_access_token_cookie(response, new_access_token)
-    return {"message": "access token이 재발급되었습니다."}
+    set_refresh_token_cookie(response, new_refresh_token)
 
+    return {"message": "access token과 refresh token이 재발급되었습니다."}
 
 # ─── 로그인 상태 확인 ─────────────────────────────────────────────
 @router.get("/me")
@@ -190,6 +230,8 @@ async def login(request: Request,user_credentials: UserLogin, response: Response
         response=response,
         db=db,
         user=user,
+        user_agent=request.headers.get("user-agent"),
+        ip_address=request.client.host if request.client else None,
     )
 
     return {
@@ -204,7 +246,25 @@ async def login(request: Request,user_credentials: UserLogin, response: Response
 
 # ─── 로그아웃 ────────────────────────────────────────────────────
 @router.post("/logout")
-async def logout(response: Response):
+async def logout(
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    refresh_token = request.cookies.get("refresh_token")
+
+    if refresh_token:
+        token_hash = hash_refresh_token(refresh_token)
+        result = await db.execute(
+            select(RefreshToken).where(RefreshToken.token_hash == token_hash)
+        )
+        token_row = result.scalar_one_or_none()
+
+        if token_row and token_row.revoked_at is None:
+            token_row.revoked_at = datetime.now(timezone.utc)
+            token_row.revoke_reason = "logout"
+            await db.commit()
+
     clear_access_token_cookie(response)
     clear_refresh_token_cookie(response)
     return {"message": "로그아웃 되었습니다."}

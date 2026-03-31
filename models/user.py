@@ -28,12 +28,10 @@ class User(Base):
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
     )
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
-    banned_until: Mapped[datetime | None] = mapped_column(DateTime)
-    last_login_at: Mapped[datetime | None] = mapped_column(DateTime)
-    created_at: Mapped[datetime | None] = mapped_column(DateTime, server_default=func.now())
-    updated_at: Mapped[datetime | None] = mapped_column(
-        DateTime, server_default=func.now(), onupdate=func.now()
-    )
+    banned_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     # Relationships
     hosted_parties: Mapped[list["Party"]] = relationship("Party", back_populates="host")  # noqa
