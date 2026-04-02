@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
+    CAPTCHA_JWT_SECRET: str = ""
 
     # CORS
     ALLOWED_ORIGINS: list[str]
@@ -41,6 +42,20 @@ class Settings(BaseSettings):
     # Cookie
     COOKIE_SECURE: bool = False
     COOKIE_SAMESITE: str = "lax"
+
+    # Captcha - 1차 행동 기반 캡챠
+    CAPTCHA_PASS_THRESHOLD: float = 0.7
+    CAPTCHA_CHALLENGE_THRESHOLD: float = 0.3
+    CAPTCHA_SESSION_TTL_SECONDS: int = 120
+    CAPTCHA_TOKEN_TTL_SECONDS: int = 300
+    CAPTCHA_TOKEN_MAX_USES: int = 3
+    CAPTCHA_MAX_ATTEMPTS: int = 5
+    CAPTCHA_LOCK_SECONDS: int = 1800
+    CAPTCHA_BAN_SECONDS: int = 86400
+    CAPTCHA_WAIT_SECONDS: int = 30
+    CAPTCHA_RATE_LIMIT_WINDOW_SECONDS: int = 60
+    CAPTCHA_RATE_LIMIT_MAX_REQUESTS: int = 10
+    CAPTCHA_MIN_SOLVE_SECONDS: float = 0.8
 
     # OAuth - Google
     GOOGLE_CLIENT_ID: str = ""
