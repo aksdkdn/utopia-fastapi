@@ -14,7 +14,7 @@ from core.database import get_db
 from core.redis_client import redis_client
 from models.user import User
 from models.refresh_token import RefreshToken
-from schemas import UserCreate, UserOut, UserResponse
+from schemas import UserCreate, UserOut, UserResponse, UserLogin
 from services.auth_service import (
     get_password_hash,
     verify_password,
