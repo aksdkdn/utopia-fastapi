@@ -34,17 +34,26 @@ jobs:
             StrictHostKeyChecking no
           EOF
 
+      - name: Write env file
+        run: |
+          echo "${{ secrets.ENV_FILE }}" > /tmp/env_file
+
+      - name: Copy env file to server
+        run: |
+          scp -o ProxyJump=bastion /tmp/env_file fastapi:~/fastapi/utopia-fastapi-main/.env
+
       - name: Deploy
         run: |
           ssh fastapi << 'ENDSSH'
             set -e
+
+            if [ ! -d ~/fastapi/utopia-fastapi-main/.git ]; then
+              mkdir -p ~/fastapi
+              git clone https://github.com/Utopia-party/utopia-fastapi.git ~/fastapi/utopia-fastapi-main
+            fi
+
             cd ~/fastapi/utopia-fastapi-main
-
             git pull origin main
-
-            cat > .env << 'EOF'
-          ${{ secrets.ENV_FILE }}
-          EOF
 
             source venv/bin/activate
             pip install -r requirements.txt
