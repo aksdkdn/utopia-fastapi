@@ -576,10 +576,11 @@ def _build_new_challenge_payload(
     emoji_lib = EMOJI_ASSET_LIBRARY if EMOJI_ASSET_LIBRARY else PHOTO_ASSET_LIBRARY
     photo_lib = PHOTO_ASSET_LIBRARY
 
+    # 이모지가 없는 카테고리는 실사 이미지로 대체 (임시)
     available_categories = [
         category
         for category in SUPPORTED_CHALLENGE_CATEGORIES
-        if photo_lib.get(category) and emoji_lib.get(category)
+        if photo_lib.get(category)
     ]
 
     if len(available_categories) < 3:
@@ -603,11 +604,17 @@ def _build_new_challenge_payload(
 
     emojis: list[dict[str, Any]] = []
     for index, category in enumerate(categories):
-        asset_path = _pick_from_library(emoji_lib, category, used_emoji_paths)
+        # 이모지가 없는 카테고리는 실사 이미지로 대체 (임시)
+        if emoji_lib.get(category):
+            asset_path = _pick_from_library(emoji_lib, category, used_emoji_paths)
+            bucket = emoji_bucket
+        else:
+            asset_path = _pick_from_library(photo_lib, category, used_photo_paths)
+            bucket = settings.MINIO_PHOTO_BUCKET
         emojis.append(
             {
                 "id": f"emoji-{category}-{index}",
-                "url": _build_minio_url(emoji_bucket, asset_path),
+                "url": _build_minio_url(bucket, asset_path),
                 "category": category,
             }
         )
