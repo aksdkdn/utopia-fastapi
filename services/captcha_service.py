@@ -819,6 +819,7 @@ async def initiate_captcha(payload: CaptchaInitRequest, request: Request) -> Cap
     return CaptchaInitResponse(status="challenge", session_id=session_id)
 
 
+# ── 수정됨: get_challenge에 디버그 print 추가 ─────────────────
 async def get_challenge(session_id: str, request: Request) -> CaptchaChallengeResponse:
     session = await _load_json(_session_key(session_id))
     if not session:
@@ -828,10 +829,15 @@ async def get_challenge(session_id: str, request: Request) -> CaptchaChallengeRe
         )
 
     client_ip = extract_client_ip(request)
-    if session.get("client_ip") != client_ip:
+    session_ip = session.get("client_ip")
+    print(f"[DEBUG] get_challenge: session_ip={session_ip}, request_ip={client_ip}")
+    print(f"[DEBUG] Headers: {dict(request.headers)}")
+
+    if session_ip != client_ip:
+        print(f"[DEBUG] IP MISMATCH!")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="세션을 발급받은 클라이언트와 현재 요청이 일치하지 않습니다.",
+            detail=f"IP 불일치: session={session_ip}, request={client_ip}",
         )
 
     if session.get("status") != "challenge":
