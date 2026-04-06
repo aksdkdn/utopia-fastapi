@@ -42,6 +42,7 @@ jobs:
         run: |
           ssh fastapi 'bash -s' << 'ENDSSH'
             if [ ! -d /home/ubuntu/fastapi/utopia-fastapi-main/.git ]; then
+              rm -rf /home/ubuntu/fastapi/utopia-fastapi-main
               mkdir -p /home/ubuntu/fastapi
               git clone https://github.com/Utopia-party/utopia-fastapi.git /home/ubuntu/fastapi/utopia-fastapi-main
             else
