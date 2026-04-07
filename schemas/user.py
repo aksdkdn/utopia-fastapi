@@ -2,6 +2,11 @@ import uuid
 from pydantic import BaseModel
 from typing import Optional
 
+# ✅ 추가된 공통 메시지 응답 스키마
+class MessageOut(BaseModel):
+    message: str
+
+    model_config = {"from_attributes": True}
 
 class UserResponse(BaseModel):
     id: uuid.UUID
