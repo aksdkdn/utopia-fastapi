@@ -1,7 +1,8 @@
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -33,6 +34,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# 응답 시간 측정 미들웨어 (병목 진단용)
+# 200ms 이상 걸리는 요청만 로그로 출력 → 콘솔 노이즈 최소화
+@app.middleware("http")
+async def timing_middleware(request: Request, call_next):
+    started = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    if elapsed_ms >= 200:
+        print(f"[TIMING] {elapsed_ms:7.0f}ms  {request.method} {request.url.path}")
+    return response
 
 app.include_router(auth.router, prefix="/api")
 app.include_router(parties.router, prefix="/api")

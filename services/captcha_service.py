@@ -1,5 +1,7 @@
+import asyncio
 import hashlib
 import json
+import logging
 import math
 import random
 import time
@@ -11,8 +13,10 @@ from fastapi import HTTPException, Request, status
 from jose import JWTError, jwt
 from minio import Minio
 from minio.error import S3Error
+from sqlalchemy import text
 
 from core.config import settings
+from core.database import AsyncSessionLocal
 from core.redis_client import redis_client
 from schemas.captcha import (
     CaptchaChallengeResponse,
@@ -24,6 +28,8 @@ from schemas.captcha import (
     CaptchaVerifyRequest,
     CaptchaVerifyResponse,
 )
+
+logger = logging.getLogger("captcha_service")
 
 
 # ─────────────────────────────────────────────
@@ -55,6 +61,13 @@ CAPTCHA_MIN_SOLVE_SECONDS = getattr(settings, "CAPTCHA_MIN_SOLVE_SECONDS", 0.8)
 CAPTCHA_JWT_SECRET = getattr(settings, "CAPTCHA_JWT_SECRET", "") or settings.SECRET_KEY
 CAPTCHA_JWT_TYPE = "captcha"
 
+# 이미지 바이트 인메모리 캐시 (LRU)
+# 캡챠 이미지는 고정 풀에서 반복 사용되므로 한 번 받아오면 영구 캐시.
+# 키: (bucket, key) → value: (bytes, content_type)
+# 약 2000장 × 평균 100KB = 약 200MB 상한 가정.
+_IMAGE_CACHE_MAX = 2000
+_image_cache: dict[tuple[str, str], tuple[bytes, str]] = {}
+
 
 # ─────────────────────────────────────────────
 # 문제 세트 생성용 동물 이미지 메타데이터
@@ -72,9 +85,15 @@ minio_client = Minio(
 ANIMAL_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 ANIMAL_LABELS: dict[str, str] = {
     "bear": "곰",
+    "cat": "고양이",
     "dog": "강아지",
+    "elephant": "코끼리",
     "fox": "여우",
+    "horse": "말",
+    "lion": "사자",
     "penguin": "펭귄",
+    "tiger": "호랑이",
+    "wolf": "늑대",
 }
 SUPPORTED_CHALLENGE_CATEGORIES = tuple(ANIMAL_LABELS.keys())
 
@@ -552,12 +571,91 @@ def _calculate_scores(payload: CaptchaInitRequest, request: Request) -> tuple[fl
 # ─────────────────────────────────────────────
 
 
-#도상원
 def _build_minio_url(bucket: str, object_name: str) -> str:
-    """MinIO 오브젝트의 직접 접근 URL 생성"""
+    """MinIO 오브젝트의 직접 접근 URL 생성 (서버 내부용)"""
     endpoint = settings.MINIO_ENDPOINT
     protocol = "https" if settings.MINIO_SECURE else "http"
     return f"{protocol}://{endpoint}/{bucket}/{quote(object_name, safe='/')}"
+
+
+# ─────────────────────────────────────────────
+# 이미지 프록시 (URL에서 동물명 노출 방지)
+# ─────────────────────────────────────────────
+
+IMAGE_TOKEN_TTL = 300  # 5분
+
+
+async def _create_image_token(bucket: str, object_name: str) -> str:
+    """이미지에 랜덤 토큰 부여, Redis에 매핑 저장"""
+    token = uuid.uuid4().hex[:16]
+    await redis_client.setex(
+        f"captcha:img:{token}",
+        IMAGE_TOKEN_TTL,
+        json.dumps({"bucket": bucket, "key": object_name}),
+    )
+    return token
+
+
+def _build_proxy_url(token: str) -> str:
+    """프록시 URL 생성 — 브라우저에 노출되는 URL"""
+    return f"/api/captcha/image/{token}"
+
+
+def _minio_fetch_sync(bucket: str, key: str) -> bytes:
+    """동기 MinIO 호출 (asyncio.to_thread에서 실행)"""
+    response = minio_client.get_object(bucket, key)
+    try:
+        return response.read()
+    finally:
+        response.close()
+        response.release_conn()
+
+
+def _content_type_for(key: str) -> str:
+    ext = key.rsplit(".", 1)[-1].lower() if "." in key else "png"
+    return {
+        "jpg": "image/jpeg", "jpeg": "image/jpeg",
+        "png": "image/png", "webp": "image/webp",
+    }.get(ext, "image/png")
+
+
+async def get_proxied_image(token: str) -> tuple[bytes, str]:
+    """토큰으로 Redis에서 실제 경로 조회 → 캐시 또는 MinIO에서 이미지 반환.
+    캡챠 이미지는 고정 풀에서 반복 사용되므로 인메모리 캐시 적중률이 매우 높음.
+    """
+    raw = await redis_client.get(f"captcha:img:{token}")
+    if not raw:
+        raise HTTPException(status_code=404, detail="이미지 토큰이 만료되었습니다.")
+
+    info = json.loads(raw)
+    bucket = info["bucket"]
+    key = info["key"]
+
+    # 1차: 인메모리 캐시 hit → MinIO 호출 0
+    cached = _image_cache.get((bucket, key))
+    if cached is not None:
+        return cached
+
+    # 2차: MinIO 호출 (스레드풀로 분리해 이벤트 루프 블록 방지)
+    try:
+        image_bytes = await asyncio.to_thread(_minio_fetch_sync, bucket, key)
+    except S3Error as e:
+        logger.error(f"[Proxy] MinIO 조회 실패: {bucket}/{key} → {e}")
+        raise HTTPException(status_code=404, detail="이미지를 찾을 수 없습니다.")
+
+    content_type = _content_type_for(key)
+    result = (image_bytes, content_type)
+
+    # 캐시 저장 (단순 LRU 흉내: 상한 초과 시 가장 오래된 키 제거)
+    if len(_image_cache) >= _IMAGE_CACHE_MAX:
+        try:
+            oldest_key = next(iter(_image_cache))
+            del _image_cache[oldest_key]
+        except StopIteration:
+            pass
+    _image_cache[(bucket, key)] = result
+
+    return result
 
 
 def _pick_from_library(library: dict[str, list[str]], category: str, used_paths: set[str]) -> str:
@@ -569,10 +667,30 @@ def _pick_from_library(library: dict[str, list[str]], category: str, used_paths:
     return selected
 
 
-def _build_new_challenge_payload(
+async def _build_new_challenge_payload(
     request: Request,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[int]]:
-    # 이모지가 없는 카테고리는 실사로 대체 (GAN 생성 전 임시)
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[int], str | None]:
+    """
+    DB captcha_sets 우선 조회 → 없으면 MinIO fallback.
+    모든 이미지 URL은 프록시 토큰으로 감싸서 반환.
+    Returns: (emojis, photos, answer_indices, captcha_set_id)
+    """
+    # 1차: DB captcha_sets에서 조회
+    db_set = await _fetch_captcha_set_from_db()
+    if db_set and db_set["emojis"] and db_set["photos"]:
+        logger.info(f"[Challenge] DB captcha_set 사용: {db_set['set_id']}")
+        # raw key → 프록시 토큰 URL로 교체 (12개 redis SETEX를 병렬화)
+        all_items = db_set["emojis"] + db_set["photos"]
+        bucket_keys = [(item.pop("_bucket"), item["url"]) for item in all_items]
+        tokens = await asyncio.gather(*[
+            _create_image_token(bucket, key) for bucket, key in bucket_keys
+        ])
+        for item, token in zip(all_items, tokens):
+            item["url"] = _build_proxy_url(token)
+        return db_set["emojis"], db_set["photos"], db_set["answer_indices"], db_set["set_id"]
+
+    # 2차: MinIO fallback (DB에 세트가 없을 때)
+    logger.warning("[Challenge] DB captcha_set 없음 → MinIO fallback")
     emoji_lib = EMOJI_ASSET_LIBRARY if EMOJI_ASSET_LIBRARY else PHOTO_ASSET_LIBRARY
     photo_lib = PHOTO_ASSET_LIBRARY
 
@@ -586,33 +704,30 @@ def _build_new_challenge_payload(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=(
-                f"MinIO에 캡챠용 동물 이미지가 부족합니다. "
+                f"캡챠용 동물 이미지가 부족합니다. "
                 f"사용 가능: {available_categories} / 필요: 최소 3개 카테고리"
             ),
         )
 
     categories = random.sample(available_categories, 3)
-    wrong_categories = [category for category in available_categories if category not in categories]
+    # 오답은 실사 사진 전체 카테고리에서 선택 (이모지 카테고리에 국한하지 않음)
+    all_photo_categories = list(photo_lib.keys())
+    wrong_categories = [c for c in all_photo_categories if c not in categories]
     if not wrong_categories:
-        wrong_categories = [c for c in available_categories if c != categories[0]]
+        wrong_categories = [c for c in available_categories if c not in categories]
     answer_positions = sorted(random.sample(list(range(9)), 3))
     used_emoji_paths: set[str] = set()
     used_photo_paths: set[str] = set()
 
     emoji_bucket = settings.MINIO_EMOJI_BUCKET if EMOJI_ASSET_LIBRARY else settings.MINIO_PHOTO_BUCKET
 
-    emojis: list[dict[str, Any]] = []
+    # 1단계: 모든 asset 경로를 먼저 결정 (CPU 작업, 빠름)
+    emoji_specs: list[tuple[int, str, str]] = []  # (index, category, asset_path)
     for index, category in enumerate(categories):
         asset_path = _pick_from_library(emoji_lib, category, used_emoji_paths)
-        emojis.append(
-            {
-                "id": f"emoji-{category}-{index}",
-                "url": _build_minio_url(emoji_bucket, asset_path),
-                "category": category,
-            }
-        )
+        emoji_specs.append((index, category, asset_path))
 
-    photos: list[dict[str, Any]] = []
+    photo_specs: list[tuple[int, str, str]] = []  # (position, category, asset_path)
     correct_index = 0
     for position in range(9):
         if position in answer_positions:
@@ -620,18 +735,39 @@ def _build_new_challenge_payload(
             correct_index += 1
         else:
             category = random.choice(wrong_categories)
-
         asset_path = _pick_from_library(photo_lib, category, used_photo_paths)
-        photos.append(
-            {
-                "id": f"photo-{category}-{position}",
-                "url": _build_minio_url(settings.MINIO_PHOTO_BUCKET, asset_path),
-                "index": position,
-            }
-        )
+        photo_specs.append((position, category, asset_path))
 
-    return emojis, photos, answer_positions
-#도상원
+    # 2단계: 12개 토큰을 병렬로 생성 (redis SETEX 1 RTT로 압축)
+    token_coros = (
+        [_create_image_token(emoji_bucket, spec[2]) for spec in emoji_specs] +
+        [_create_image_token(settings.MINIO_PHOTO_BUCKET, spec[2]) for spec in photo_specs]
+    )
+    all_tokens = await asyncio.gather(*token_coros)
+    emoji_tokens = all_tokens[:len(emoji_specs)]
+    photo_tokens = all_tokens[len(emoji_specs):]
+
+    emojis: list[dict[str, Any]] = [
+        {
+            "id": f"e-{index}",
+            "url": _build_proxy_url(token),
+            "category": category,
+        }
+        for (index, category, _), token in zip(emoji_specs, emoji_tokens)
+    ]
+
+    photos: list[dict[str, Any]] = [
+        {
+            "id": f"p-{position}",
+            "url": _build_proxy_url(token),
+            "index": position,
+        }
+        for (position, _, _), token in zip(photo_specs, photo_tokens)
+    ]
+
+    return emojis, photos, answer_positions, None
+
+
 
 
 # ─────────────────────────────────────────────
@@ -779,33 +915,74 @@ async def initiate_captcha(payload: CaptchaInitRequest, request: Request) -> Cap
         payload,
         request,
     )
+
+    # behavior 벡터화
+    behavior_vector = _build_behavior_vector(payload)
+    fp_hash = _fingerprint_hash(payload)
+    user_agent = request.headers.get("user-agent", "")
+
     if immediate_block:
+        # DB: block 기록 (fire-and-forget, FK 순서 보장)
+        block_session_id = str(uuid.uuid4())
+        _bg(_save_session_then_embedding(
+            session_id=block_session_id, trigger_type=payload.trigger_type,
+            captcha_set_id=None, client_ip=client_ip, fingerprint_hash=fp_hash,
+            behavior_score=behavior_score, environment_score=environment_score,
+            final_score=final_score, status_result="block",
+            behavior_vector=behavior_vector, behavior_label="bot",
+        ))
+        _bg(_save_bot_signature(
+            client_ip, fp_hash, user_agent,
+            "immediate_block_env_or_header", behavior_score, final_score,
+        ))
         return CaptchaInitResponse(
             status="block",
             message="비정상적인 브라우저 환경이 감지되었습니다.",
         )
 
     if final_score >= CAPTCHA_PASS_THRESHOLD:
-        token = await _issue_captcha_token(
-            client_ip,
-            final_score,
-            payload.session_id or str(uuid.uuid4()),
-        )
+        # PK 충돌 방지: 항상 새 UUID 생성 (다른 분기와 동일하게 통일)
+        # payload.session_id를 재사용하면 프론트가 init을 두 번 호출할 때
+        # UniqueViolation 발생함
+        pass_session_id = str(uuid.uuid4())
+        token = await _issue_captcha_token(client_ip, final_score, pass_session_id)
+        # DB: pass 기록 (fire-and-forget, FK 순서 보장)
+        _bg(_save_session_then_embedding(
+            session_id=pass_session_id, trigger_type=payload.trigger_type,
+            captcha_set_id=None, client_ip=client_ip, fingerprint_hash=fp_hash,
+            behavior_score=behavior_score, environment_score=environment_score,
+            final_score=final_score, status_result="pass",
+            behavior_vector=behavior_vector, behavior_label="human",
+        ))
         return CaptchaInitResponse(status="pass", token=token)
 
     if final_score <= CAPTCHA_CHALLENGE_THRESHOLD:
+        # DB: block (low score) 기록 (fire-and-forget, FK 순서 보장)
+        block_session_id = str(uuid.uuid4())
+        _bg(_save_session_then_embedding(
+            session_id=block_session_id, trigger_type=payload.trigger_type,
+            captcha_set_id=None, client_ip=client_ip, fingerprint_hash=fp_hash,
+            behavior_score=behavior_score, environment_score=environment_score,
+            final_score=final_score, status_result="block",
+            behavior_vector=behavior_vector, behavior_label="bot",
+        ))
+        _bg(_save_bot_signature(
+            client_ip, fp_hash, user_agent,
+            "low_score_block", behavior_score, final_score,
+        ))
         return CaptchaInitResponse(
             status="block",
             message="보안 정책에 따라 접근이 제한되었습니다.",
         )
 
+    # challenge 분기
     session_id = str(uuid.uuid4())
     session_payload = {
         "session_id": session_id,
         "client_ip": client_ip,
         "trigger_type": payload.trigger_type,
         "client_session_id": payload.session_id,
-        "fingerprint_hash": _fingerprint_hash(payload),
+        "fingerprint_hash": fp_hash,
         "behavior_score": round(behavior_score, 4),
         "environment_score": round(environment_score, 4),
         "final_score": round(final_score, 4),
@@ -815,6 +992,15 @@ async def initiate_captcha(payload: CaptchaInitRequest, request: Request) -> Cap
     }
     await _save_json(_session_key(session_id), CAPTCHA_SESSION_TTL_SECONDS, session_payload)
     await _bind_active_session(client_ip, session_id)
+
+    # DB: challenge 기록 (fire-and-forget, FK 순서 보장)
+    _bg(_save_session_then_embedding(
+        session_id=session_id, trigger_type=payload.trigger_type,
+        captcha_set_id=None, client_ip=client_ip, fingerprint_hash=fp_hash,
+        behavior_score=behavior_score, environment_score=environment_score,
+        final_score=final_score, status_result="challenge",
+        behavior_vector=behavior_vector, behavior_label="unknown",
+    ))
 
     return CaptchaInitResponse(status="challenge", session_id=session_id)
 
@@ -843,10 +1029,11 @@ async def get_challenge(session_id: str, request: Request) -> CaptchaChallengeRe
     await _bind_active_session(client_ip, session_id)
 
     if not session.get("emojis") or not session.get("photos"):
-        emojis, photos, answer_indices = _build_new_challenge_payload(request)
+        emojis, photos, answer_indices, captcha_set_id = await _build_new_challenge_payload(request)
         session["emojis"] = emojis
         session["photos"] = photos
         session["answer_indices"] = answer_indices
+        session["captcha_set_id"] = captcha_set_id
         session["challenge_issued_at"] = _now_time()
         await _save_json(_session_key(session_id), CAPTCHA_SESSION_TTL_SECONDS, session)
 
@@ -886,6 +1073,9 @@ async def verify_challenge(payload: CaptchaVerifyRequest, request: Request) -> C
     if solve_seconds < CAPTCHA_MIN_SOLVE_SECONDS:
         is_correct = False
 
+    solve_time_ms = int(solve_seconds * 1000)
+    captcha_set_id = session.get("captcha_set_id")
+
     if is_correct:
         token = await _issue_captcha_token(
             client_ip,
@@ -894,6 +1084,29 @@ async def verify_challenge(payload: CaptchaVerifyRequest, request: Request) -> C
         )
         await redis_client.delete(_session_key(payload.session_id))
         await _clear_active_session(client_ip)
+
+        # DB: verify 성공 업데이트
+        try:
+            async with AsyncSessionLocal() as db:
+                await db.execute(text("""
+                    UPDATE captcha_sessions
+                    SET status = 'pass', attempt_count = :attempts,
+                        solve_time_ms = :solve_ms, is_correct = true,
+                        captcha_set_id = :captcha_set_id
+                    WHERE id = :sid
+                """), {
+                    "attempts": attempts + 1,
+                    "solve_ms": solve_time_ms,
+                    "captcha_set_id": captcha_set_id,
+                    "sid": payload.session_id,
+                })
+                await db.commit()
+        except Exception as e:
+            logger.error(f"[DB] verify 성공 업데이트 실패: {e}")
+
+        # behavior_embeddings.label: unknown → human
+        _bg(_update_embedding_label(payload.session_id, "human"))
+
         return CaptchaVerifyResponse(success=True, token=token)
 
     attempts += 1
@@ -905,6 +1118,38 @@ async def verify_challenge(payload: CaptchaVerifyRequest, request: Request) -> C
         await _save_json(_session_key(payload.session_id), CAPTCHA_SESSION_TTL_SECONDS, session)
         await _clear_active_session(client_ip)
         await _mark_lock(client_ip)
+
+        # DB: 실패 초과 → block 업데이트 + bot_signatures
+        try:
+            async with AsyncSessionLocal() as db:
+                await db.execute(text("""
+                    UPDATE captcha_sessions
+                    SET status = 'block', attempt_count = :attempts,
+                        solve_time_ms = :solve_ms, is_correct = false,
+                        captcha_set_id = :captcha_set_id
+                    WHERE id = :sid
+                """), {
+                    "attempts": attempts,
+                    "solve_ms": solve_time_ms,
+                    "captcha_set_id": captcha_set_id,
+                    "sid": payload.session_id,
+                })
+                await db.commit()
+        except Exception as e:
+            logger.error(f"[DB] verify 실패초과 업데이트 실패: {e}")
+
+        # behavior_embeddings.label: unknown → bot
+        _bg(_update_embedding_label(payload.session_id, "bot"))
+
+        _bg(_save_bot_signature(
+            client_ip,
+            session.get("fingerprint_hash", ""),
+            "",
+            f"max_attempts_exceeded({attempts})",
+            float(session.get("behavior_score", 0)),
+            float(session.get("final_score", 0)),
+        ))
+
         return CaptchaVerifyResponse(
             success=False,
             remaining_attempts=0,
@@ -930,3 +1175,401 @@ async def verify_challenge(payload: CaptchaVerifyRequest, request: Request) -> C
         remaining_attempts=remaining_attempts,
         message=message,
     )
+
+
+# ─────────────────────────────────────────────
+# DB: captcha_sets 기반 이미지 조회
+# ─────────────────────────────────────────────
+
+
+async def _fetch_captcha_set_from_db() -> dict[str, Any] | None:
+    """DB captcha_sets에서 랜덤 1세트를 가져와 이미지 URL 구성"""
+    try:
+        async with AsyncSessionLocal() as db:
+            # use_count 100회 미만에서 랜덤 선택
+            result = await db.execute(text("""
+                SELECT cs.id, cs.emoji_ids, cs.photo_ids, cs.answer_indices
+                FROM captcha_sets cs
+                WHERE cs.is_active = true AND cs.use_count < 100
+                ORDER BY RANDOM()
+                LIMIT 1
+            """))
+            row = result.fetchone()
+            if not row:
+                return None
+
+            set_id, emoji_ids, photo_ids, answer_indices = row
+
+            # use_count 증가
+            await db.execute(text("""
+                UPDATE captcha_sets SET use_count = use_count + 1 WHERE id = :set_id
+            """), {"set_id": set_id})
+
+            # emoji_images에서 category + image_key 조회
+            emoji_result = await db.execute(text("""
+                SELECT id, category, image_key FROM emoji_images
+                WHERE id = ANY(:ids) AND is_active = true
+            """), {"ids": emoji_ids})
+            emoji_rows = emoji_result.fetchall()
+
+            # real_photos에서 category + image_key 조회
+            photo_result = await db.execute(text("""
+                SELECT id, category, image_key FROM real_photos
+                WHERE id = ANY(:ids) AND is_active = true
+            """), {"ids": photo_ids})
+            photo_rows = photo_result.fetchall()
+
+            await db.commit()
+
+            emojis = []
+            emoji_map = {str(r[0]): (r[1], r[2]) for r in emoji_rows}
+            for idx, eid in enumerate(emoji_ids):
+                eid_str = str(eid)
+                if eid_str in emoji_map:
+                    cat, key = emoji_map[eid_str]
+                    emojis.append({
+                        "id": f"e-{idx}",
+                        "url": key,           # 아직 raw key — _build_new_challenge_payload에서 토큰화
+                        "category": cat,
+                        "_bucket": settings.MINIO_EMOJI_BUCKET,
+                    })
+
+            photos = []
+            photo_map = {str(r[0]): (r[1], r[2]) for r in photo_rows}
+            for pos, pid in enumerate(photo_ids):
+                pid_str = str(pid)
+                if pid_str in photo_map:
+                    cat, key = photo_map[pid_str]
+                    photos.append({
+                        "id": f"p-{pos}",
+                        "url": key,           # raw key
+                        "index": pos,
+                        "_bucket": settings.MINIO_PHOTO_BUCKET,
+                    })
+
+            return {
+                "set_id": str(set_id),
+                "emojis": emojis,
+                "photos": photos,
+                "answer_indices": list(answer_indices),
+            }
+    except Exception as e:
+        logger.error(f"[DB] captcha_sets 조회 실패: {e}")
+        return None
+
+
+# ─────────────────────────────────────────────
+# DB: 백그라운드 fire-and-forget 헬퍼
+# 메트릭/로깅 용 INSERT는 응답 경로에서 분리하여 latency 최소화
+# ─────────────────────────────────────────────
+
+
+def _bg(coro) -> None:
+    """코루틴을 백그라운드 태스크로 던지고 즉시 반환.
+    예외는 태스크 내부의 try/except에서 로그로 처리됨."""
+    try:
+        asyncio.create_task(coro)
+    except RuntimeError:
+        # 이벤트 루프가 없는 동기 컨텍스트에서 호출된 경우 무시
+        pass
+
+
+async def _update_embedding_label(session_id: str, label: str) -> None:
+    """challenge verify 결과에 따라 behavior_embeddings.label 업데이트.
+    init 시점엔 'unknown'으로 박혀 있다가, verify 성공 시 'human',
+    실패 초과 시 'bot'으로 갱신된다.
+    """
+    try:
+        async with AsyncSessionLocal() as db:
+            await db.execute(text("""
+                UPDATE behavior_embeddings
+                SET label = :label
+                WHERE session_id = :sid
+            """), {"label": label, "sid": session_id})
+            await db.commit()
+    except Exception as e:
+        logger.error(f"[DB] behavior_embedding label 업데이트 실패: {e}")
+
+
+async def _save_session_then_embedding(
+    *,
+    session_id: str,
+    trigger_type: str,
+    captcha_set_id: str | None,
+    client_ip: str,
+    fingerprint_hash: str,
+    behavior_score: float,
+    environment_score: float,
+    final_score: float,
+    status_result: str,
+    behavior_vector: list[float],
+    behavior_label: str,
+) -> None:
+    """captcha_sessions INSERT가 commit된 후에 behavior_embeddings INSERT.
+    behavior_embeddings.session_id 가 captcha_sessions.id 를 FK 참조하므로
+    순서를 강제해야 ForeignKeyViolationError 방지.
+    """
+    await _save_captcha_session_to_db(
+        session_id=session_id,
+        trigger_type=trigger_type,
+        captcha_set_id=captcha_set_id,
+        client_ip=client_ip,
+        fingerprint_hash=fingerprint_hash,
+        behavior_score=behavior_score,
+        environment_score=environment_score,
+        header_score=0.0,
+        final_score=final_score,
+        status_result=status_result,
+    )
+    await _save_behavior_embedding(session_id, behavior_vector, behavior_label)
+
+
+# ─────────────────────────────────────────────
+# DB: captcha_sessions 저장 (모든 결과 기록)
+# ─────────────────────────────────────────────
+
+
+async def _save_captcha_session_to_db(
+    session_id: str,
+    trigger_type: str,
+    captcha_set_id: str | None,
+    client_ip: str,
+    fingerprint_hash: str,
+    behavior_score: float,
+    environment_score: float,
+    header_score: float,
+    final_score: float,
+    status_result: str,          # pass / challenge / block
+    attempt_count: int = 0,
+    solve_time_ms: int | None = None,
+    is_correct: bool | None = None,
+) -> None:
+    """captcha_sessions 테이블에 INSERT (발표 메트릭용)"""
+    try:
+        async with AsyncSessionLocal() as db:
+            await db.execute(text("""
+                INSERT INTO captcha_sessions (
+                    id, trigger_type, captcha_set_id, client_ip,
+                    behavior_score, vector_score,
+                    final_score, status, attempt_count, solve_time_ms,
+                    is_correct
+                ) VALUES (
+                    :id, :trigger_type, :captcha_set_id, CAST(:client_ip AS inet),
+                    :behavior_score, :vector_score,
+                    :final_score, :status, :attempt_count, :solve_time_ms,
+                    :is_correct
+                )
+            """), {
+                "id": session_id,
+                "trigger_type": trigger_type,
+                "captcha_set_id": captcha_set_id,
+                "client_ip": client_ip if client_ip != "unknown" else "0.0.0.0",
+                "behavior_score": round(behavior_score, 4),
+                "vector_score": round(environment_score, 4),
+                "final_score": round(final_score, 4),
+                "status": status_result,
+                "attempt_count": attempt_count,
+                "solve_time_ms": solve_time_ms,
+                "is_correct": is_correct,
+            })
+            await db.commit()
+            logger.info(f"[DB] captcha_session 저장: {session_id} → {status_result}")
+    except Exception as e:
+        logger.error(f"[DB] captcha_session 저장 실패: {e}")
+
+
+# ─────────────────────────────────────────────
+# DB: behavior 벡터화 + pgvector 유사도 검색
+# ─────────────────────────────────────────────
+
+
+def _build_behavior_vector(payload: CaptchaInitRequest) -> list[float]:
+    """
+    행동 데이터를 15차원 벡터로 변환 (pgvector 호환)
+
+    벡터 구성:
+    [0]  speed_mean              마우스 속도 평균 — 봇은 일정한 속도
+    [1]  speed_variance          마우스 속도 분산 — 봇은 분산이 극히 낮음
+    [2]  direction_changes       방향 변화 횟수 — 봇은 직선 이동
+    [3]  directness              직선 비율 — 봇은 1.0에 가까움
+    [4]  total_distance          총 이동 거리 — 사람은 더 많이 돌아다님
+    [5]  pause_count             정지 횟수(200ms+) — 사람은 멈추고 생각, 봇은 안 멈춤
+    [6]  backtrack_count         되돌아감 횟수 — 사람은 실수로 되돌아감, 봇은 안 함
+    [7]  click_spread_x          클릭 X 분산 — 봇은 정확한 좌표만 클릭
+    [8]  click_spread_y          클릭 Y 분산 — 위와 동일
+    [9]  click_interval_variance 클릭 간격 분산 — 봇은 일정한 간격
+    [10] key_interval_variance   키 입력 간격 분산 — 봇은 일정한 타이핑
+    [11] first_action_delay      첫 행동 지연(ms) — 봇은 즉시 행동
+    [12] page_load_to_checkbox   체크박스 도달 시간(ms) — 봇은 극단적으로 빠름
+    [13] scrolled                스크롤 여부 — 사람은 스크롤 자주 함
+    [14] move_to_click_ratio     이동/클릭 비율 — 사람은 이동이 많고 클릭이 적음
+    """
+    moves = payload.mouse_moves
+    clicks = payload.clicks
+
+    # ── mouse features ──
+    total_distance = 0.0
+    speeds: list[float] = []
+    direction_changes = 0
+    pause_count = 0
+    backtrack_count = 0
+    prev_angle: float | None = None
+
+    for prev_m, cur_m in zip(moves, moves[1:]):
+        dx = cur_m.x - prev_m.x
+        dy = cur_m.y - prev_m.y
+        dt = max(cur_m.t - prev_m.t, 1)
+        dist = math.hypot(dx, dy)
+        total_distance += dist
+        speeds.append(dist / dt)
+
+        # 정지 감지: 200ms 이상 같은 위치 (이동거리 2px 이하)
+        if dt >= 200 and dist <= 2.0:
+            pause_count += 1
+
+        # 방향 변화 + 되돌아감 감지
+        angle = math.atan2(dy, dx)
+        if prev_angle is not None:
+            angle_diff = abs(angle - prev_angle)
+            # 방향 변화: 약 31도 이상 꺾임
+            if angle_diff > 0.55:
+                direction_changes += 1
+            # 되돌아감: 약 140도 이상 반전 (거의 반대 방향)
+            if angle_diff > 2.44:
+                backtrack_count += 1
+        prev_angle = angle
+
+    speed_mean = sum(speeds) / max(len(speeds), 1)
+    speed_var = _variance(speeds)
+    straight = math.hypot(
+        moves[-1].x - moves[0].x, moves[-1].y - moves[0].y
+    ) if len(moves) >= 2 else 0.0
+    directness = straight / max(total_distance, 1.0)
+
+    # ── click features ──
+    click_count = len(clicks)
+    cx = [c.x for c in clicks]
+    cy = [c.y for c in clicks]
+    spread_x = math.sqrt(_variance(cx)) if cx else 0.0
+    spread_y = math.sqrt(_variance(cy)) if cy else 0.0
+    click_intervals = [
+        max(cur_c.t - prev_c.t, 1) for prev_c, cur_c in zip(clicks, clicks[1:])
+    ]
+    ci_var = _variance([float(v) for v in click_intervals])
+
+    # ── timing features ──
+    ki_var = _variance([float(v) for v in payload.key_intervals]) if payload.key_intervals else 0.0
+    event_times = [m.t for m in moves] + [c.t for c in clicks]
+    first_action = min(event_times) if event_times else payload.page_load_to_checkbox
+
+    return [
+        speed_mean,                                        # [0]
+        speed_var,                                         # [1]
+        float(direction_changes),                          # [2]
+        directness,                                        # [3]
+        total_distance,                                    # [4]
+        float(pause_count),                                # [5]
+        float(backtrack_count),                             # [6]
+        spread_x,                                          # [7]
+        spread_y,                                          # [8]
+        ci_var,                                            # [9]
+        ki_var,                                            # [10]
+        float(first_action),                               # [11]
+        float(payload.page_load_to_checkbox),              # [12]
+        1.0 if payload.scrolled else 0.0,                  # [13]
+        float(len(moves)) / max(click_count, 1),           # [14]
+    ]
+
+
+async def _save_behavior_embedding(
+    session_id: str,
+    vector: list[float],
+    label: str,
+) -> None:
+    """behavior_embeddings 테이블에 INSERT"""
+    try:
+        async with AsyncSessionLocal() as db:
+            vec_str = "[" + ",".join(str(v) for v in vector) + "]"
+            await db.execute(text("""
+                INSERT INTO behavior_embeddings (id, session_id, vector, label)
+                VALUES (:id, :session_id, CAST(:vector AS vector), :label)
+            """), {
+                "id": str(uuid.uuid4()),
+                "session_id": session_id,
+                "vector": vec_str,
+                "label": label,
+            })
+            await db.commit()
+    except Exception as e:
+        logger.error(f"[DB] behavior_embedding 저장 실패: {e}")
+
+
+async def _search_similar_behaviors(vector: list[float], top_k: int = 5) -> list[dict]:
+    """pgvector 코사인 유사도 검색으로 유사 행동 패턴 조회"""
+    try:
+        async with AsyncSessionLocal() as db:
+            vec_str = "[" + ",".join(str(v) for v in vector) + "]"
+            result = await db.execute(text("""
+                SELECT label, 1 - (vector <=> CAST(:vec AS vector)) as similarity
+                FROM behavior_embeddings
+                ORDER BY vector <=> CAST(:vec AS vector)
+                LIMIT :k
+            """), {"vec": vec_str, "k": top_k})
+            rows = result.fetchall()
+            return [{"label": r[0], "similarity": round(r[1], 4)} for r in rows]
+    except Exception as e:
+        logger.error(f"[DB] pgvector 검색 실패: {e}")
+        return []
+
+
+async def _calculate_vector_score(similar_results: list[dict]) -> float:
+    """유사 행동 검색 결과로 봇 의심 점수 계산 (높을수록 사람)"""
+    if not similar_results:
+        return 0.5  # 데이터 없으면 중립
+
+    bot_count = sum(1 for r in similar_results if r["label"] == "bot")
+    human_count = sum(1 for r in similar_results if r["label"] == "human")
+    total = len(similar_results)
+
+    if total == 0:
+        return 0.5
+
+    human_ratio = human_count / total
+    avg_sim = sum(r["similarity"] for r in similar_results) / total
+
+    # human 비율이 높고 유사도 높으면 → 높은 점수
+    return _clamp(human_ratio * 0.7 + avg_sim * 0.3)
+
+
+# ─────────────────────────────────────────────
+# DB: bot_signatures INSERT (block 시 영구 기록)
+# ─────────────────────────────────────────────
+
+
+async def _save_bot_signature(
+    client_ip: str,
+    fingerprint_hash: str,
+    user_agent: str,
+    reason: str,
+    behavior_score: float,
+    final_score: float,
+) -> None:
+    """bot_signatures 테이블에 INSERT"""
+    try:
+        async with AsyncSessionLocal() as db:
+            await db.execute(text("""
+                INSERT INTO bot_signatures (
+                    id, ip_address, fingerprint_hash, reason
+                ) VALUES (
+                    :id, CAST(:ip AS inet), :fp, :reason
+                )
+            """), {
+                "id": str(uuid.uuid4()),
+                "ip": client_ip if client_ip != "unknown" else "0.0.0.0",
+                "fp": fingerprint_hash,
+                "reason": f"{reason} (b={behavior_score:.2f},f={final_score:.2f},ua={user_agent[:50]})",
+            })
+            await db.commit()
+            logger.info(f"[DB] bot_signature 저장: {client_ip} / {reason}")
+    except Exception as e:
+        logger.error(f"[DB] bot_signature 저장 실패: {e}")

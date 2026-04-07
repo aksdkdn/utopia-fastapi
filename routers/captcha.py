@@ -1,16 +1,20 @@
 from fastapi import APIRouter, File, Form, Request, UploadFile
+from fastapi.responses import Response
 import httpx
 import uuid
 import random
 import json
+import logging
 import redis.asyncio as redis
 import traceback
 
 from core.config import settings
 from schemas.captcha import (
     CaptchaChallengeResponse,
+    CaptchaEnvInfo,
     CaptchaInitRequest,
     CaptchaInitResponse,
+    CaptchaScreenInfo,
     CaptchaStatusResponse,
     CaptchaVerifyRequest,
     CaptchaVerifyResponse,
@@ -18,6 +22,7 @@ from schemas.captcha import (
 from services.captcha_service import (
     get_captcha_status,
     get_challenge,
+    get_proxied_image,
     initiate_captcha,
     verify_challenge,
 )
@@ -48,6 +53,45 @@ async def captcha_verify(payload: CaptchaVerifyRequest, request: Request):
 @router.get("/status", response_model=CaptchaStatusResponse)
 async def captcha_status(request: Request):
     return await get_captcha_status(request)
+
+
+@router.get("/image/{token}")
+async def captcha_image_proxy(token: str):
+    """이미지 프록시 — URL에서 동물 카테고리명 노출 방지"""
+    image_bytes, content_type = await get_proxied_image(token)
+    return Response(
+        content=image_bytes,
+        media_type=content_type,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+# ─────────────────────────────────────────────
+# 발표 시연용 테스트 엔드포인트
+# ─────────────────────────────────────────────
+
+
+@router.post("/test/simulate-bot", response_model=CaptchaInitResponse)
+async def simulate_bot(request: Request):
+    """발표용: Selenium 봇 시뮬레이션 → block"""
+    fake_payload = CaptchaInitRequest(
+        mouse_moves=[],
+        clicks=[],
+        key_intervals=[],
+        scrolled=False,
+        env=CaptchaEnvInfo(
+            webdriver=True,
+            plugins_count=0,
+            canvas_hash="",
+            webgl_renderer="",
+            screen=CaptchaScreenInfo(width=0, height=0),
+            timezone="",
+            languages=[],
+        ),
+        page_load_to_checkbox=50,
+        trigger_type="new_ip_login",
+    )
+    return await initiate_captcha(fake_payload, request)
 
 
 redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
