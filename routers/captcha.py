@@ -1,5 +1,4 @@
 from fastapi import APIRouter, File, Form, Request, UploadFile
-from fastapi.responses import Response
 import httpx
 import uuid
 import random
@@ -14,10 +13,8 @@ import asyncpg
 from core.config import settings
 from schemas.captcha import (
     CaptchaChallengeResponse,
-    CaptchaEnvInfo,
     CaptchaInitRequest,
     CaptchaInitResponse,
-    CaptchaScreenInfo,
     CaptchaStatusResponse,
     CaptchaVerifyRequest,
     CaptchaVerifyResponse,
@@ -25,13 +22,11 @@ from schemas.captcha import (
 from services.captcha_service import (
     get_captcha_status,
     get_challenge,
-    get_proxied_image,
     initiate_captcha,
     verify_challenge,
 )
 
-# 상원: 1차 캡챠 API를 /api/captcha/* 아래로 고정해서 프론트 호출 경로와 맞춥니다.
-router = APIRouter(prefix="/captcha")  # 상원
+router = APIRouter()
 logger = logging.getLogger("handocr-api")
 
 
@@ -41,29 +36,21 @@ logger = logging.getLogger("handocr-api")
 
 @router.post("/init", response_model=CaptchaInitResponse)
 async def captcha_init(payload: CaptchaInitRequest, request: Request):
-    # 상원: 행동 데이터 기반 1차 판정을 시작하는 진입점입니다.
-    # 상원: 실제 점수 계산과 세션 생성은 서비스 계층 함수 initiate_captcha에 위임합니다.
     return await initiate_captcha(payload, request)
 
 
-@router.get("/challenge", response_model=CaptchaChallengeResponse)  # 상원
+@router.get("/challenge", response_model=CaptchaChallengeResponse)
 async def captcha_challenge(session_id: str, request: Request):
-    # 상원: challenge 상태 세션의 3x3 이미지 문제를 내려줍니다.
-    # 상원: 세션 검증과 문제 생성은 서비스 계층 함수 get_challenge가 처리합니다.
     return await get_challenge(session_id, request)
 
 
-@router.post("/verify", response_model=CaptchaVerifyResponse)  # 상원
+@router.post("/verify", response_model=CaptchaVerifyResponse)
 async def captcha_verify(payload: CaptchaVerifyRequest, request: Request):
-    # 상원: 사용자가 선택한 3칸이 이모지 순서와 맞는지 검증하고 통과 토큰을 발급합니다.
-    # 상원: 실제 정답 판정과 토큰 발급은 서비스 계층 함수 verify_challenge가 처리합니다.
     return await verify_challenge(payload, request)
 
 
-@router.get("/status", response_model=CaptchaStatusResponse)  # 상원
+@router.get("/status", response_model=CaptchaStatusResponse)
 async def captcha_status(request: Request):
-    # 상원: WAIT, LOCKED, BANNED와 active_session_id를 조회해 프론트 재진입 흐름을 맞춥니다.
-    # 상원: 상태 계산은 서비스 계층 함수 get_captcha_status에 위임합니다.
     return await get_captcha_status(request)
 
 
@@ -84,39 +71,23 @@ ALL_POSES = [
 MAX_ATTEMPTS = 5
 
 
-# DATABASE_URL 예:
-# postgresql+asyncpg://admin1234:admin1234@localhost:5432/partyup
-DATABASE_URL = settings.DATABASE_URL
+# PostgreSQL 연결 정보
+# 예:
+# settings.POSTGRES_DSN = "postgresql://user:password@10.10.0.12:5432/appdb"
+POSTGRES_DSN = settings.POSTGRES_DSN
 
 _db_pool: Optional[asyncpg.Pool] = None
 
 
-def normalize_asyncpg_dsn(database_url: str) -> str:
-    """
-    SQLAlchemy 스타일 DSN:
-      postgresql+asyncpg://...
-    를 asyncpg용 DSN:
-      postgresql://...
-    로 변환
-    """
-    if database_url.startswith("postgresql+asyncpg://"):
-        return database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
-    return database_url
-
-
 async def get_db_pool() -> asyncpg.Pool:
     global _db_pool
-
     if _db_pool is None:
-        dsn = normalize_asyncpg_dsn(DATABASE_URL)
         _db_pool = await asyncpg.create_pool(
-            dsn=dsn,
+            dsn=POSTGRES_DSN,
             min_size=1,
             max_size=5,
             command_timeout=10,
         )
-        logger.info("PostgreSQL pool initialized")
-
     return _db_pool
 
 
@@ -187,8 +158,7 @@ async def save_hand_pose_sample(
 ):
     """
     손 포즈 재학습용 샘플 저장.
-    성공/실패 모두 저장하되,
-    나중에 재학습 시 verify_success=True 또는 pose_match=True 조건으로 추출 가능.
+    성공/실패 모두 저장하되, 나중에 재학습할 때는 verify_success=True 또는 pose_match=True 기준으로 추출하면 됨.
     """
     pool = await get_db_pool()
 
@@ -303,7 +273,6 @@ async def save_hand_pose_sample(
 
 @router.post("/captcha/handocr/start")
 async def start_captcha():
-    # 상원: 2차 handOCR 캡챠 시작 시 문제 문자열과 손 포즈를 세션으로 발급합니다.
     chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     random_text = "".join(random.choice(chars) for _ in range(5))
     random_pose = random.choice(ALL_POSES)
@@ -324,9 +293,8 @@ async def start_captcha():
     }
 
 
-@router.post("/handocr/verify")  # 상원
+@router.post("/captcha/handocr/verify")
 async def verify_captcha(sessionId: str = Form(...), image: UploadFile = File(...)):
-    # 상원: 업로드 이미지를 GPU 서버에 보내 손 포즈와 OCR 결과를 검증합니다.
     session_str = await redis_client.get(f"captcha:{sessionId}")
     if not session_str:
         return {
@@ -399,23 +367,20 @@ async def verify_captcha(sessionId: str = Form(...), image: UploadFile = File(..
                 session_data["attempts"] += 1
                 await redis_client.setex(f"captcha:{sessionId}", 300, json.dumps(session_data))
 
-                try:
-                    await save_hand_pose_sample(
-                        session_id=sessionId,
-                        expected_pose=expected_pose,
-                        expected_text=expected_text,
-                        verify_success=False,
-                        pose_match=None,
-                        text_match=None,
-                        gpu_result={
-                            "success": False,
-                            "error_code": "GPU_JSON_PARSE_FAILED",
-                            "message": "AI 서버 응답을 해석하지 못했습니다.",
-                            "detail": repr(json_error),
-                        },
-                    )
-                except Exception:
-                    logger.exception("failed to save GPU_JSON_PARSE_FAILED sample")
+                await save_hand_pose_sample(
+                    session_id=sessionId,
+                    expected_pose=expected_pose,
+                    expected_text=expected_text,
+                    verify_success=False,
+                    pose_match=None,
+                    text_match=None,
+                    gpu_result={
+                        "success": False,
+                        "error_code": "GPU_JSON_PARSE_FAILED",
+                        "message": "AI 서버 응답을 해석하지 못했습니다.",
+                        "detail": repr(json_error),
+                    },
+                )
 
                 return {
                     "success": False,
@@ -602,6 +567,7 @@ async def verify_captcha(sessionId: str = Form(...), image: UploadFile = File(..
         await redis_client.setex(f"captcha:{sessionId}", 300, json.dumps(session_data))
         remaining_attempts = MAX_ATTEMPTS - session_data["attempts"]
 
+        # 실패 샘플도 저장
         try:
             await save_hand_pose_sample(
                 session_id=sessionId,
@@ -641,6 +607,7 @@ async def verify_captcha(sessionId: str = Form(...), image: UploadFile = File(..
     pose_ok = detected_pose == expected_pose
     text_ok = detected_text == expected_text
 
+    # 성공/실패와 상관없이, 여기까지 온 정상 응답 샘플은 저장
     try:
         await save_hand_pose_sample(
             session_id=sessionId,
