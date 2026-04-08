@@ -23,8 +23,6 @@ class Party(Base):
     max_members: Mapped[int | None] = mapped_column(Integer)
     current_members: Mapped[int | None] = mapped_column(Integer)
     monthly_per_person: Mapped[int | None] = mapped_column(Integer)
-    account_id: Mapped[str | None] = mapped_column(String(255))
-    account_password: Mapped[str | None] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="recruiting")
     start_date: Mapped[date | None] = mapped_column(Date)
     end_date: Mapped[date | None] = mapped_column(Date)
