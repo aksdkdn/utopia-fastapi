@@ -57,10 +57,12 @@ class Report(Base):
     description: Mapped[str] = mapped_column(Text, nullable=False)
     evidence_key: Mapped[str | None] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="pending")
-    resolved_by: Mapped[uuid.UUID | None] = mapped_column(
+    reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
     )
-    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    action_result_code: Mapped[str | None] = mapped_column(String(30))
+    admin_memo: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -160,6 +162,7 @@ class ActivityLog(Base):
     ip_address: Mapped[str | None] = mapped_column(String(64))
     user_agent: Mapped[str | None] = mapped_column(Text)
     extra_metadata: Mapped[dict | None] = mapped_column("metadata", JSONB)
+    target_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

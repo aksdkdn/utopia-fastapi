@@ -212,6 +212,7 @@ async def _append_activity_log(
     description: str,
     path: str | None = None,
     ip_address: str | None = None,
+    target_id: Any | None = None,
 ) -> None:
     metadata = {"path": path} if path else None
     db.add(
@@ -221,6 +222,7 @@ async def _append_activity_log(
             description=description,
             ip_address=ip_address,
             extra_metadata=metadata,
+            target_id=target_id,
         )
     )
 
@@ -317,23 +319,23 @@ def _assert_admin_permission(
 def _latest_user_status_actions_subquery():
     ranked_actions = (
         select(
-            ModerationAction.user_id.label("user_id"),
-            ModerationAction.action_type.label("action_type"),
+            ActivityLog.target_id.label("target_user_id"),
+            ActivityLog.action_type.label("action_type"),
             func.row_number()
             .over(
-                partition_by=ModerationAction.user_id,
-                order_by=ModerationAction.created_at.desc(),
+                partition_by=ActivityLog.target_id,
+                order_by=ActivityLog.created_at.desc(),
             )
             .label("row_num"),
         )
         .where(
-            ModerationAction.user_id.is_not(None),
-            ModerationAction.action_type.in_(["STATUS_정상", "STATUS_주의", "STATUS_정지"]),
+            ActivityLog.target_id.is_not(None),
+            ActivityLog.action_type.in_(["STATUS_정상", "STATUS_주의", "STATUS_정지"]),
         )
         .subquery()
     )
     return (
-        select(ranked_actions.c.user_id, ranked_actions.c.action_type)
+        select(ranked_actions.c.target_user_id, ranked_actions.c.action_type)
         .where(ranked_actions.c.row_num == 1)
         .subquery()
     )
@@ -440,7 +442,7 @@ async def get_admin_dashboard(
         select(func.count()).select_from(Report).where(func.lower(Report.status) == "pending")
     ) or 0
     pending_settlements = await db.scalar(
-        select(func.count()).select_from(Settlement).where(Settlement.status == "PENDING")
+        select(func.count()).select_from(Settlement).where(func.lower(Settlement.status) == "pending")
     ) or 0
 
     active_users = await db.scalar(
@@ -617,7 +619,7 @@ async def get_admin_users(
         )
         .outerjoin(report_counts, report_counts.c.user_id == User.id)
         .outerjoin(party_counts, party_counts.c.user_id == User.id)
-        .outerjoin(latest_status_actions, latest_status_actions.c.user_id == User.id)
+        .outerjoin(latest_status_actions, latest_status_actions.c.target_user_id == User.id)
         .order_by(User.created_at.desc())
     )
     result = await db.execute(stmt)
@@ -674,12 +676,12 @@ async def get_admin_user_detail(
         select(func.count()).select_from(PartyMember).where(PartyMember.user_id == user.id)
     ) or 0
     manual_action = await db.scalar(
-        select(ModerationAction.action_type)
+        select(ActivityLog.action_type)
         .where(
-            ModerationAction.user_id == user.id,
-            ModerationAction.action_type.in_(["STATUS_정상", "STATUS_주의", "STATUS_정지"]),
+            ActivityLog.target_id == user.id,
+            ActivityLog.action_type.in_(["STATUS_정상", "STATUS_주의", "STATUS_정지"]),
         )
-        .order_by(ModerationAction.created_at.desc())
+        .order_by(ActivityLog.created_at.desc())
         .limit(1)
     )
 
@@ -786,14 +788,6 @@ async def update_admin_user_status(
         target_user.banned_until = None
 
     db.add(
-        ModerationAction(
-            user_id=target_user.id,
-            admin_id=admin.user.id,
-            action_type=f"STATUS_{payload.status}",
-            reason=payload.reason,
-        )
-    )
-    db.add(
         Notification(
             user_id=target_user.id,
             type="SYSTEM",
@@ -805,9 +799,10 @@ async def update_admin_user_status(
     await _append_activity_log(
         db,
         actor_user_id=admin.user.id,
-        action_type="user_status_updated",
+        action_type=f"STATUS_{payload.status}",
         description=f"{target_user.nickname} 상태를 {payload.status}로 변경",
         path=f"/api/admin/users/{user_id}/status",
+        target_id=target_user.id,
     )
     await _append_system_log(
         db,
@@ -996,8 +991,8 @@ async def update_admin_report_status(
         raise HTTPException(status_code=404, detail="신고를 찾을 수 없습니다.")
 
     report.status = _report_status_code(payload.status)
-    report.resolved_by = admin.user.id
-    report.resolved_at = datetime.now(timezone.utc)
+    report.reviewed_by = admin.user.id
+    report.reviewed_at = datetime.now(timezone.utc)
 
     await _append_activity_log(
         db,
