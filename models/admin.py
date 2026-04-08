@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func, text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from core.database import Base
@@ -57,7 +57,6 @@ class Report(Base):
     description: Mapped[str] = mapped_column(Text, nullable=False)
     evidence_key: Mapped[str | None] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="pending")
-    resolution: Mapped[str | None] = mapped_column(Text)
     resolved_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
     )
@@ -74,13 +73,15 @@ class Receipt(Base):
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
     user_id: Mapped[uuid.UUID] = mapped_column(
+        "uploader_id",
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
     )
     party_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("parties.id"), nullable=False
     )
-    ocr_amount: Mapped[int] = mapped_column(Integer, nullable=False)
-    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="PENDING")
+    ocr_amount: Mapped[int] = mapped_column("amount", Integer, nullable=False)
+    billing_month: Mapped[str | None] = mapped_column(String(7))
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="pending")
     image_key: Mapped[str | None] = mapped_column(String(255))
     reviewed_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
@@ -106,20 +107,13 @@ class Settlement(Base):
     total_amount: Mapped[int] = mapped_column(Integer, nullable=False)
     member_count: Mapped[int] = mapped_column(Integer, nullable=False)
     billing_month: Mapped[str] = mapped_column(String(7), nullable=False)
-    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="PENDING")
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="pending")
     approved_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
     )
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    rejected_by: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
-    )
-    rejected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now()
     )
 
 
@@ -133,13 +127,22 @@ class ModerationAction(Base):
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
     )
     admin_id: Mapped[uuid.UUID | None] = mapped_column(
+        "created_by",
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
     )
+    party_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("parties.id"), nullable=True
+    )
+    chat_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
     action_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    duration_minutes: Mapped[int | None] = mapped_column(Integer)
     reason: Mapped[str | None] = mapped_column(Text)
+    trust_score_change: Mapped[float | None] = mapped_column()
+    is_auto: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ActivityLog(Base):
@@ -149,12 +152,14 @@ class ActivityLog(Base):
         UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
     actor_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        "user_id",
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
     )
-    action_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    action_type: Mapped[str] = mapped_column("action", String(50), nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False)
-    path: Mapped[str | None] = mapped_column(String(255))
     ip_address: Mapped[str | None] = mapped_column(String(64))
+    user_agent: Mapped[str | None] = mapped_column(Text)
+    extra_metadata: Mapped[dict | None] = mapped_column("metadata", JSONB)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -169,7 +174,10 @@ class SystemLog(Base):
     level: Mapped[str] = mapped_column(String(20), nullable=False, server_default="INFO")
     service: Mapped[str] = mapped_column(String(50), nullable=False, server_default="admin")
     message: Mapped[str] = mapped_column(Text, nullable=False)
-    actor: Mapped[str | None] = mapped_column(String(100))
+    extra_metadata: Mapped[dict | None] = mapped_column("metadata", JSONB)
+    admin_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

@@ -108,8 +108,8 @@ async def admin_access_log_middleware(request: Request, call_next):
                         actor_user_id=_extract_actor_user_id(request),
                         action_type="admin_access",
                         description=f"{request.method} {request.url.path} -> {response.status_code}",
-                        path=request.url.path,
                         ip_address=request.client.host if request.client else None,
+                        extra_metadata={"path": request.url.path},
                     )
                 )
                 await session.commit()

@@ -174,34 +174,34 @@ def _report_target_counts_subquery(target_type: str, label: str):
 
 def _receipt_status_label(value: str) -> str:
     return {
-        "PENDING": "대기",
-        "APPROVED": "승인",
-        "REJECTED": "거절",
-    }.get(value.upper(), value)
+        "pending": "대기",
+        "approved": "승인",
+        "rejected": "거절",
+    }.get(value.lower(), value)
 
 
 def _receipt_status_code(value: str) -> str:
     return {
-        "대기": "PENDING",
-        "승인": "APPROVED",
-        "거절": "REJECTED",
-    }.get(value, value.upper())
+        "대기": "pending",
+        "승인": "approved",
+        "거절": "rejected",
+    }.get(value, value.lower())
 
 
 def _settlement_status_label(value: str) -> str:
     return {
-        "PENDING": "대기",
-        "APPROVED": "승인",
-        "REJECTED": "거절",
-    }.get(value.upper(), value)
+        "pending": "대기",
+        "approved": "승인",
+        "rejected": "거절",
+    }.get(value.lower(), value)
 
 
 def _settlement_status_code(value: str) -> str:
     return {
-        "대기": "PENDING",
-        "승인": "APPROVED",
-        "거절": "REJECTED",
-    }.get(value, value.upper())
+        "대기": "pending",
+        "승인": "approved",
+        "거절": "rejected",
+    }.get(value, value.lower())
 
 
 async def _append_activity_log(
@@ -213,13 +213,14 @@ async def _append_activity_log(
     path: str | None = None,
     ip_address: str | None = None,
 ) -> None:
+    metadata = {"path": path} if path else None
     db.add(
         ActivityLog(
             actor_user_id=actor_user_id,
             action_type=action_type,
             description=description,
-            path=path,
             ip_address=ip_address,
+            extra_metadata=metadata,
         )
     )
 
@@ -232,7 +233,8 @@ async def _append_system_log(
     message: str,
     actor: str | None = None,
     ) -> None:
-    db.add(SystemLog(level=level, service=service, message=message, actor=actor))
+    metadata = {"actor": actor} if actor else None
+    db.add(SystemLog(level=level, service=service, message=message, extra_metadata=metadata))
 
 
 def _admin_permissions_payload(payload: AdminRoleUpdateIn) -> dict[str, bool]:
@@ -452,13 +454,13 @@ async def get_admin_dashboard(
     ) or 0
 
     approved_amount = await db.scalar(
-        select(func.coalesce(func.sum(Receipt.ocr_amount), 0)).where(Receipt.status == "APPROVED")
+        select(func.coalesce(func.sum(Receipt.ocr_amount), 0)).where(func.lower(Receipt.status) == "approved")
     ) or 0
     pending_amount = await db.scalar(
-        select(func.coalesce(func.sum(Receipt.ocr_amount), 0)).where(Receipt.status == "PENDING")
+        select(func.coalesce(func.sum(Receipt.ocr_amount), 0)).where(func.lower(Receipt.status) == "pending")
     ) or 0
     rejected_amount = await db.scalar(
-        select(func.coalesce(func.sum(Receipt.ocr_amount), 0)).where(Receipt.status == "REJECTED")
+        select(func.coalesce(func.sum(Receipt.ocr_amount), 0)).where(func.lower(Receipt.status) == "rejected")
     ) or 0
 
     return AdminDashboardOut(
@@ -996,7 +998,6 @@ async def update_admin_report_status(
     report.status = _report_status_code(payload.status)
     report.resolved_by = admin.user.id
     report.resolved_at = datetime.now(timezone.utc)
-    report.resolution = payload.status
 
     await _append_activity_log(
         db,
@@ -1104,12 +1105,9 @@ async def update_admin_settlement_status(
 
     next_status = _settlement_status_code(payload.status)
     stl.status = next_status
-    if next_status == "APPROVED":
+    if next_status == "approved":
         stl.approved_by = admin.user.id
         stl.approved_at = datetime.now(timezone.utc)
-    elif next_status == "REJECTED":
-        stl.rejected_by = admin.user.id
-        stl.rejected_at = datetime.now(timezone.utc)
 
     await _append_activity_log(
         db,
@@ -1168,7 +1166,8 @@ async def get_admin_logs(
                 timestamp=_format_datetime(row.created_at),
                 type=row.level.upper(),
                 message=row.message,
-                actor=row.actor or row.service,
+                actor=((row.extra_metadata or {}).get("actor") if row.extra_metadata else None)
+                or (str(row.admin_id) if row.admin_id else row.service),
             )
             for row in system_rows
         ]
