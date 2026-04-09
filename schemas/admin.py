@@ -1,7 +1,7 @@
 from pydantic import BaseModel, Field
 
 
-INT32_MAX = 2_147_483_647
+INT32_MAX = 1_000_000
 
 
 class DashboardMetricOut(BaseModel):
