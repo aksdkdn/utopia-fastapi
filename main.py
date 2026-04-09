@@ -22,9 +22,37 @@ logging.basicConfig(level=logging.DEBUG)
 async def lifespan(app: FastAPI):
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-        await conn.execute(text("ALTER TABLE services ADD COLUMN IF NOT EXISTS selling_price INTEGER"))
         await conn.execute(
-            text("UPDATE services SET selling_price = monthly_price WHERE selling_price IS NULL")
+            text(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'services'
+                          AND column_name = 'original_price'
+                    ) THEN
+                        EXECUTE 'ALTER TABLE services ADD COLUMN original_price INTEGER';
+                    END IF;
+
+                    IF EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'services'
+                          AND column_name = 'selling_price'
+                    ) THEN
+                        EXECUTE 'UPDATE services SET monthly_price = COALESCE(selling_price, monthly_price)';
+                        EXECUTE 'ALTER TABLE services DROP COLUMN selling_price';
+                    END IF;
+
+                    EXECUTE 'UPDATE services SET original_price = COALESCE(original_price, monthly_price) WHERE original_price IS NULL';
+                END
+                $$;
+                """
+            )
         )
     yield
 

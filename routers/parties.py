@@ -26,10 +26,10 @@ logger = logging.getLogger(__name__)
 
 
 # 구독가격표시 code
-def _service_selling_price(service: Service | None) -> int | None:
+def _service_monthly_price(service: Service | None) -> int | None:
     if service is None:
         return None
-    return service.selling_price if service.selling_price is not None else service.monthly_price
+    return service.monthly_price
 
 
 def _party_max_members(party: Party, service: Service | None) -> int | None:
@@ -47,7 +47,13 @@ def _party_total_price(party: Party, service: Service | None) -> int | None:
     max_members = _party_max_members(party, service)
     if party.monthly_per_person is not None and max_members:
         return party.monthly_per_person * max_members
-    return _service_selling_price(service)
+    return _service_monthly_price(service)
+
+
+def _service_original_price(service: Service | None) -> int | None:
+    if service is None:
+        return None
+    return service.original_price if service.original_price is not None else service.monthly_price
 # 구독가격표시
 
 
@@ -77,6 +83,7 @@ def _build_party_out(party: Party, current_user_id: Optional[uuid.UUID] = None) 
         # 구독가격표시 code
         max_members=_party_max_members(party, svc),
         monthly_price=_party_total_price(party, svc),
+        original_price=_service_original_price(svc),
         logo_image_key=svc.logo_image_key if svc else None,
         logo_image_url=build_minio_asset_url(svc.logo_image_key) if svc else None,
         member_count=_party_member_count(party),
@@ -177,7 +184,7 @@ async def create_party(
         raise HTTPException(status_code=400, detail="현재 비활성화된 서비스입니다.")
 
     # 구독가격표시 code
-    service_price = _service_selling_price(service)
+    service_price = _service_monthly_price(service)
     max_members = service.max_members
     monthly_per_person = (
         round(service_price / max_members)
