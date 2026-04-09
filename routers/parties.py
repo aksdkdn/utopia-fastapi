@@ -24,6 +24,39 @@ from schemas.user import MessageOut
 router = APIRouter(prefix="/parties", tags=["parties"])
 logger = logging.getLogger(__name__)
 
+
+# 구독가격표시 code
+def _service_monthly_price(service: Service | None) -> int | None:
+    if service is None:
+        return None
+    return service.monthly_price
+
+
+def _party_max_members(party: Party, service: Service | None) -> int | None:
+    return party.max_members or (service.max_members if service else None)
+
+
+def _party_member_count(party: Party) -> int:
+    if party.current_members is not None:
+        return party.current_members
+    member_count = len(party.members) if party.members is not None else 0
+    return member_count + (1 if party.leader_id else 0)
+
+
+def _party_total_price(party: Party, service: Service | None) -> int | None:
+    max_members = _party_max_members(party, service)
+    if party.monthly_per_person is not None and max_members:
+        return party.monthly_per_person * max_members
+    return _service_monthly_price(service)
+
+
+def _service_original_price(service: Service | None) -> int | None:
+    if service is None:
+        return None
+    return service.original_price if service.original_price is not None else service.monthly_price
+# 구독가격표시
+
+
 def _build_party_out(party: Party, current_user_id: Optional[uuid.UUID] = None) -> PartyOut:
     """
     Party 객체를 PartyOut 스키마로 변환하며, 현재 유저의 참여 여부를 계산합니다.
@@ -47,11 +80,14 @@ def _build_party_out(party: Party, current_user_id: Optional[uuid.UUID] = None) 
         host_nickname=party.host.nickname if party.host else None,
         service_name=svc.name if svc else None,
         category_name=svc.category if svc else None,
-        max_members=svc.max_members if svc else None,
-        monthly_price=svc.monthly_price if svc else None,
+        # 구독가격표시 code
+        max_members=_party_max_members(party, svc),
+        monthly_price=_party_total_price(party, svc),
+        original_price=_service_original_price(svc),
         logo_image_key=svc.logo_image_key if svc else None,
         logo_image_url=build_minio_asset_url(svc.logo_image_key) if svc else None,
-        member_count=len(party.members) if party.members is not None else 0,
+        member_count=_party_member_count(party),
+        # 구독가격표시
         is_joined=is_joined
     )
 
@@ -141,10 +177,29 @@ async def create_party(
     current_user: User = Depends(require_user),
     db: AsyncSession = Depends(get_db),
 ):
+    service = await db.get(Service, body.service_id)
+    if not service:
+        raise HTTPException(status_code=404, detail="서비스를 찾을 수 없습니다.")
+    if not service.is_active:
+        raise HTTPException(status_code=400, detail="현재 비활성화된 서비스입니다.")
+
+    # 구독가격표시 code
+    service_price = _service_monthly_price(service)
+    max_members = service.max_members
+    monthly_per_person = (
+        round(service_price / max_members)
+        if service_price is not None and max_members > 0
+        else None
+    )
+    # 구독가격표시
+
     party = Party(
         leader_id=current_user.id,
         service_id=body.service_id,
         title=body.title,
+        max_members=max_members,
+        current_members=1,
+        monthly_per_person=monthly_per_person,
         status="recruiting",
     )
     db.add(party)
@@ -190,16 +245,15 @@ async def join_party(
         raise HTTPException(status_code=400, detail="이미 참여한 파티입니다.")
 
     if party.service:
-        count_result = await db.execute(
-            select(func.count()).select_from(PartyMember).where(PartyMember.party_id == party_id)
-        )
-        current_count = count_result.scalar() or 0
-        if current_count >= party.service.max_members:
+        current_count = _party_member_count(party)
+        max_members = _party_max_members(party, party.service)
+        if max_members is not None and current_count >= max_members:
             raise HTTPException(status_code=400, detail="파티 인원이 가득 찼습니다.")
 
     try:
         new_member = PartyMember(party_id=party_id, user_id=current_user.id)
         db.add(new_member)
+        party.current_members = _party_member_count(party) + 1
         await db.commit()
     except Exception as e:
         await db.rollback()
