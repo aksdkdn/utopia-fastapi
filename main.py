@@ -49,6 +49,24 @@ async def lifespan(app: FastAPI):
                     END IF;
 
                     EXECUTE 'UPDATE services SET original_price = COALESCE(original_price, monthly_price) WHERE original_price IS NULL';
+
+                    IF EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'activity_logs'
+                          AND column_name = 'ip_address'
+                          AND udt_name <> 'inet'
+                    ) THEN
+                        EXECUTE '
+                            ALTER TABLE activity_logs
+                            ALTER COLUMN ip_address TYPE inet
+                            USING CASE
+                                WHEN ip_address IS NULL OR btrim(ip_address::text) = '''' THEN NULL
+                                ELSE ip_address::inet
+                            END
+                        ';
+                    END IF;
                 END
                 $$;
                 """
