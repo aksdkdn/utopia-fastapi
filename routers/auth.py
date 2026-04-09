@@ -44,6 +44,9 @@ from services.oauth_service import (
     get_kakao_access_token, get_kakao_user_info,
     get_naver_access_token, get_naver_user_info,
 )
+# from services.mypage.profile_service import (
+#     _build_profile_image_url,
+# )
 
 router = APIRouter(tags=["auth"])
 
@@ -129,7 +132,7 @@ async def refresh_token_api(
 
     return {"message": "access token과 refresh token이 재발급되었습니다."}
 
-
+# 마이페이지 프로필 및 로그인 상태 관리
 @router.get("/me")
 async def me(
     access_token: str | None = Cookie(default=None, alias="access_token"),
@@ -159,6 +162,11 @@ async def me(
             "nickname": user.nickname,
             "provider": user.provider,
             "role": user.role,
+            "phone":user.phone,
+            "trust_score": user.trust_score,
+            "created_at" :user.created_at,
+            "updated_at":user.updated_at,
+            # "profile_image": _build_profile_image_url(user.profile_image_key),
         },
     }
 
@@ -537,5 +545,6 @@ async def login(request: Request, user_credentials: UserLogin, response: Respons
             "email": user.email,
             "nickname": user.nickname,
             "role": user.role,
+            "phone" : user.phone,
         },
     }
