@@ -24,8 +24,20 @@ MAX_IMAGE_SIZE = 5 * 1024 * 1024
 
 
 def _get_minio_client() -> Minio:
+    """내부 전용 클라이언트 - 업로드/삭제용"""
     return Minio(
         endpoint=settings.MINIO_ENDPOINT,
+        access_key=settings.MINIO_ACCESS_KEY,
+        secret_key=settings.MINIO_SECRET_KEY,
+        secure=settings.MINIO_SECURE,
+    )
+
+
+def _get_public_minio_client() -> Minio:
+    """브라우저용 Presigned URL 생성 전용 클라이언트 (공인 IP로 서명)"""
+    endpoint = settings.MINIO_PUBLIC_ENDPOINT or settings.MINIO_ENDPOINT
+    return Minio(
+        endpoint=endpoint,
         access_key=settings.MINIO_ACCESS_KEY,
         secret_key=settings.MINIO_SECRET_KEY,
         secure=settings.MINIO_SECURE,
@@ -52,27 +64,18 @@ def _get_extension(filename: Optional[str], content_type: Optional[str]) -> str:
 
 
 def _build_profile_image_url(profile_image_key: Optional[str]) -> Optional[str]:
-    """
-    MinIO에서 이미지 URL을 생성하고, 브라우저에서 접근 가능하도록 공인 IP로 치환합니다.
-    """
+    """공인 IP 클라이언트로 서명 → host 치환 없이 바로 사용 가능"""
     if not profile_image_key:
         return None
 
-    client = _get_minio_client()
-    
-    # 내부 Endpoint(10.10.0.10) 기준으로 서명된 URL 생성
+    client = _get_public_minio_client()
+
     url = client.presigned_get_object(
         settings.PROFILE_MINIO_BUCKET,
         profile_image_key,
         expires=timedelta(hours=1),
     )
 
-    # 브라우저 접근을 위해 공인 IP(MINIO_PUBLIC_ENDPOINT)로 주소 교체
-    if settings.MINIO_PUBLIC_ENDPOINT:
-        # settings.MINIO_ENDPOINT(예: 10.10.0.10:9000)를 
-        # settings.MINIO_PUBLIC_ENDPOINT(예: 210.109.15.10/minio)로 변경
-        url = url.replace(settings.MINIO_ENDPOINT, settings.MINIO_PUBLIC_ENDPOINT)
-    
     return url
 
 
