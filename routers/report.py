@@ -2,45 +2,70 @@ from __future__ import annotations
 
 from collections import Counter
 from typing import Annotated
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from core.database import get_db
+from core.security import get_current_user
 from models.report import Report, ReportEvidence
 from models.user import User
 from schemas.report import ReportResponse, ReportSummaryResponse
 from services.report_storage_service import upload_report_file
 from services.report_target_service import resolve_target_snapshot_name
-from core.security import get_current_user  # 실제 경로 확인 필요
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
-ALLOWED_TARGET_TYPES = {"USER", "PARTY", "CHAT"}
+ALLOWED_TARGET_TYPE = "USER"
 ALLOWED_CATEGORIES = {"PROFANITY", "SCAM", "SPAM"}
 ALLOWED_STATUSES = {"PENDING", "IN_REVIEW", "APPROVED", "REJECTED"}
 
 
+async def resolve_report_target_user_id(
+    db: AsyncSession,
+    target_identifier: str | None,
+) -> str:
+    if not target_identifier:
+        raise HTTPException(
+            status_code=400,
+            detail="사용자 신고는 닉네임 또는 이메일이 필요합니다.",
+        )
+
+    value = target_identifier.strip()
+    if not value:
+        raise HTTPException(
+            status_code=400,
+            detail="사용자 신고는 닉네임 또는 이메일이 필요합니다.",
+        )
+
+    result = await db.execute(
+        select(User.id).where(
+            or_(User.nickname == value, User.email == value)
+        )
+    )
+    resolved_id = result.scalar_one_or_none()
+
+    if resolved_id is None:
+        raise HTTPException(status_code=404, detail="신고 대상을 찾을 수 없습니다.")
+
+    return resolved_id
+
+
 @router.post("", response_model=ReportResponse, status_code=status.HTTP_201_CREATED)
 async def create_report(
-    target_type: Annotated[str, Form(...)],
-    target_id: Annotated[UUID, Form(...)],
     category: Annotated[str, Form(...)],
     description: Annotated[str, Form(...)],
+    target_identifier: Annotated[str, Form(...)],
     files: list[UploadFile] | None = File(default=None),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     try:
-        target_type = target_type.upper().strip()
         category = category.upper().strip()
         description = description.strip()
-
-        if target_type not in ALLOWED_TARGET_TYPES:
-            raise HTTPException(status_code=400, detail="유효하지 않은 target_type 입니다.")
+        target_identifier = target_identifier.strip()
 
         if category not in ALLOWED_CATEGORIES:
             raise HTTPException(status_code=400, detail="유효하지 않은 category 입니다.")
@@ -48,14 +73,25 @@ async def create_report(
         if not description:
             raise HTTPException(status_code=400, detail="신고 내용을 입력해주세요.")
 
-        snapshot_name = await resolve_target_snapshot_name(db, target_type, target_id)
+        resolved_target_id = await resolve_report_target_user_id(
+            db=db,
+            target_identifier=target_identifier,
+        )
+
+        if resolved_target_id == current_user.id:
+            raise HTTPException(
+                status_code=400,
+                detail="본인 계정은 신고할 수 없습니다.",
+            )
+
+        snapshot_name = await resolve_target_snapshot_name(db, ALLOWED_TARGET_TYPE, resolved_target_id)
         if snapshot_name is None:
             raise HTTPException(status_code=404, detail="신고 대상을 찾을 수 없습니다.")
 
         report = Report(
             reporter_id=current_user.id,
-            target_type=target_type,
-            target_id=target_id,
+            target_type=ALLOWED_TARGET_TYPE,
+            target_id=resolved_target_id,
             target_snapshot_name=snapshot_name,
             category=category,
             description=description,
@@ -104,7 +140,7 @@ async def create_report(
     except Exception:
         await db.rollback()
         raise
-    
+
 
 @router.get("", response_model=list[ReportResponse])
 async def list_my_reports(
