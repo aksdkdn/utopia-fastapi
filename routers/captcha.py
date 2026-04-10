@@ -15,6 +15,11 @@ from core.config import settings
 router = APIRouter()
 logger = logging.getLogger("handocr-api")
 
+
+# ─────────────────────────────────────────────
+# HandOCR 캡챠 설정
+# ─────────────────────────────────────────────
+
 redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
 GPU_SERVER_URL = settings.GPU_SERVER_URL
 
@@ -137,7 +142,6 @@ def get_client_ip(request: Request) -> str:
     """
     운영에서 프록시(Nginx/ALB/Cloudflare) 뒤에 있다면
     해당 프록시를 신뢰하는 구성일 때만 X-Forwarded-For를 사용하세요.
-    그렇지 않으면 spoof 가능성이 있습니다.
     """
     x_forwarded_for = request.headers.get("x-forwarded-for")
     if x_forwarded_for:
@@ -176,9 +180,6 @@ async def block_ip(ip: str, ttl_seconds: int, reason: str):
 
 
 async def register_start_rate_limit(ip: str) -> tuple[bool, Optional[int], dict]:
-    """
-    /start 요청 rate limit
-    """
     key_1m = f"captcha:start:{ip}:1m"
     key_10m = f"captcha:start:{ip}:10m"
 
@@ -213,9 +214,6 @@ async def register_start_rate_limit(ip: str) -> tuple[bool, Optional[int], dict]
 
 
 async def register_verify_failure(ip: str) -> tuple[bool, Optional[int], dict]:
-    """
-    /verify 실패 누적
-    """
     key_10m = f"captcha:verify_fail:{ip}:10m"
     key_1h = f"captcha:verify_fail:{ip}:1h"
 
@@ -252,9 +250,6 @@ async def register_verify_failure(ip: str) -> tuple[bool, Optional[int], dict]:
 
 
 async def relax_verify_failures_on_success(ip: str):
-    """
-    성공 시 완전 초기화 대신 단기 실패 카운트만 완화.
-    """
     await redis_client.delete(f"captcha:verify_fail:{ip}:10m")
 
 
@@ -277,12 +272,6 @@ async def handle_verify_failure_common(
     message: str,
     failure_reason: dict,
 ):
-    """
-    verify 실패 공통 처리:
-    - 세션 attempts 증가
-    - TTL 유지
-    - IP 실패 누적
-    """
     session_data["attempts"] = session_data.get("attempts", 0) + 1
     await redis_client.setex(
         f"captcha:{session_id}",
@@ -445,7 +434,10 @@ async def start_captcha(request: Request):
 
     blocked, ttl = await is_ip_blocked(ip)
     if blocked:
-        return make_blocked_response(ttl, f"요청이 너무 많아 임시 차단되었습니다. {ttl}초 후 다시 시도해주세요.")
+        return make_blocked_response(
+            ttl,
+            f"요청이 너무 많아 임시 차단되었습니다. {ttl}초 후 다시 시도해주세요."
+        )
 
     limited, limit_ttl, _ = await register_start_rate_limit(ip)
     if limited:
@@ -456,16 +448,30 @@ async def start_captcha(request: Request):
 
     active_session_key = f"captcha:active_session:{ip}"
     existing_session_id = await redis_client.get(active_session_key)
+
+    # active session이 있으면 에러 반환 대신 기존 문제 재사용
     if existing_session_id:
-        existing_ttl = await redis_client.ttl(active_session_key)
-        return {
-            "success": False,
-            "message": "이미 진행 중인 인증 세션이 있습니다. 기존 문제를 먼저 완료하거나 만료를 기다려주세요.",
-            "failureReason": {
-                "type": "ACTIVE_SESSION_EXISTS",
-                "retryAfterSeconds": existing_ttl if existing_ttl and existing_ttl > 0 else CAPTCHA_SESSION_TTL,
+        existing_session_str = await redis_client.get(f"captcha:{existing_session_id}")
+
+        # active_session 키는 있는데 실제 세션이 없으면 stale key 정리
+        if existing_session_str:
+            existing_session = json.loads(existing_session_str)
+            existing_ttl = await redis_client.ttl(f"captcha:{existing_session_id}")
+
+            # active_session TTL도 세션 TTL에 맞춰 갱신
+            if existing_ttl and existing_ttl > 0:
+                await redis_client.expire(active_session_key, existing_ttl)
+
+            return {
+                "success": True,
+                "sessionId": existing_session_id,
+                "text": existing_session["text"],
+                "pose": existing_session["pose"],
+                "reused": True,
+                "remainingSeconds": existing_ttl if existing_ttl and existing_ttl > 0 else CAPTCHA_SESSION_TTL,
             }
-        }
+        else:
+            await redis_client.delete(active_session_key)
 
     chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     random_text = "".join(random.choice(chars) for _ in range(5))
@@ -490,7 +496,9 @@ async def start_captcha(request: Request):
         "success": True,
         "sessionId": session_id,
         "text": random_text,
-        "pose": random_pose
+        "pose": random_pose,
+        "reused": False,
+        "remainingSeconds": CAPTCHA_SESSION_TTL,
     }
 
 
@@ -525,7 +533,6 @@ async def verify_captcha(
     expected_text = session_data["text"]
     session_ip = session_data.get("ip")
 
-    # 세션을 발급받은 IP와 verify 요청 IP가 다르면 차단
     if session_ip and session_ip != ip:
         return await handle_verify_failure_common(
             ip=ip,
