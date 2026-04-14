@@ -170,9 +170,7 @@ async def me(
         },
     }
 
-
-
-
+# 로그아웃
 @router.post("/logout")
 async def logout(
     request: Request,
@@ -218,7 +216,7 @@ def get_oauth_user_info(oauth: str, code: str, state: Optional[str] = None):
     else:
         raise HTTPException(status_code=400, detail="지원하지 않는 소셜 로그인입니다.")
 
-
+# 소셜 로그인
 @router.post("/auth/login")
 async def social_login(data: SocialLoginBody, response: Response, db: AsyncSession = Depends(get_db)):
     oauth = data.oauth.lower().strip()
@@ -434,7 +432,7 @@ async def find_id(
 ):
     result = await db.execute(
         select(User).where(
-            User.name == payload.name,
+            User.nickname == payload.nickname,
             User.phone == payload.phone,
         )
     )

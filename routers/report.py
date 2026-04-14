@@ -13,6 +13,7 @@ from core.security import get_current_user
 from models.report import Report, ReportEvidence
 from models.user import User
 from schemas.report import ReportResponse, ReportSummaryResponse
+from services.notifications.report_notification_service import notify_report_submitted
 from services.report_storage_service import upload_report_file
 from services.report_target_service import resolve_target_snapshot_name
 
@@ -84,7 +85,11 @@ async def create_report(
                 detail="본인 계정은 신고할 수 없습니다.",
             )
 
-        snapshot_name = await resolve_target_snapshot_name(db, ALLOWED_TARGET_TYPE, resolved_target_id)
+        snapshot_name = await resolve_target_snapshot_name(
+            db,
+            ALLOWED_TARGET_TYPE,
+            resolved_target_id,
+        )
         if snapshot_name is None:
             raise HTTPException(status_code=404, detail="신고 대상을 찾을 수 없습니다.")
 
@@ -132,6 +137,13 @@ async def create_report(
             .where(Report.id == report.id)
         )
         created_report = result.scalar_one()
+
+        # 신고자: 신고 접수 완료 알림
+        await notify_report_submitted(
+            db=db,
+            report=created_report,
+        )
+
         return created_report
 
     except HTTPException:

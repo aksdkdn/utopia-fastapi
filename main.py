@@ -14,7 +14,7 @@ from sqlalchemy import text
 from core.config import settings
 from core.database import AsyncSessionLocal, Base, engine
 from models.admin import ActivityLog
-from routers import admin, assets, auth, behavior_captcha, captcha, chat, notifications, parties, report
+from routers import admin, assets, auth, behavior_captcha, captcha, chat, notifications, parties, report, ws_notifications
 from routers.mypage import profile
 logging.basicConfig(level=logging.DEBUG)
 
@@ -173,6 +173,7 @@ async def admin_access_log_middleware(request: Request, call_next):
 app.include_router(auth.router, prefix="/api")
 app.include_router(parties.router, prefix="/api")
 app.include_router(notifications.router, prefix="/api")
+app.include_router(ws_notifications.router)
 app.include_router(chat.router, prefix="/api")
 # 상원: 1차 행동 캡챠는 behavior_captcha 라우터로, 2차 handOCR 캡챠는 captcha 라우터로 각각 등록합니다.
 app.include_router(behavior_captcha.router, prefix="/api")  # 상원

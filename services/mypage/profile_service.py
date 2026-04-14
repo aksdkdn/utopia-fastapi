@@ -51,7 +51,7 @@ def _get_extension(filename: Optional[str], content_type: Optional[str]) -> str:
     }
     return mapping.get(content_type or "", ".jpg")
 
-
+# 프로필 이미지 
 def _build_profile_image_url(profile_image_key: Optional[str]) -> Optional[str]:
     """
     내부 클라이언트로 Presigned URL 생성 후
@@ -100,7 +100,7 @@ async def get_my_profile_service(
 ) -> MyPageProfileResponse:
     return _to_profile_response(current_user)
 
-
+# 프로필 수정
 async def update_my_profile_service(
     db: AsyncSession,
     current_user: User,

@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -23,5 +23,37 @@ class NotificationOut(BaseModel):
         populate_by_name=True,
     )
 
-# class NotificationResponse(NotificationBase):
-#     pass
+
+class NotificationMessage(BaseModel):
+    message: str
+
+
+class NotificationReadResponse(BaseModel):
+    message: str
+    notification_id: UUID
+    is_read: bool
+    read_at: datetime | None = None
+
+
+class NotificationReadAllResponse(BaseModel):
+    message: str
+    updated_count: int
+
+
+class NotificationSocketMessage(BaseModel):
+    type: Literal[
+        "connected",
+        "notification_created",
+        "notification_updated",
+        "notification_read",
+        "notification_deleted",
+        "notifications_read_all",
+        "unread_count_updated",
+        "pong",
+    ]
+    notification: NotificationOut | None = None
+    notifications: list[NotificationOut] | None = None
+    notification_id: UUID | None = None
+    unread_count: int | None = None
+    message: str | None = None
+    timestamp: datetime | None = None

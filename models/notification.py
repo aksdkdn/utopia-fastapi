@@ -19,20 +19,23 @@ class Notification(Base):
 
     user_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
-        ForeignKey("users.id"),
+        ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
+        index=True,
     )
 
     is_read: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
         server_default=text("false"),
+        index=True,
     )
 
     created_at: Mapped[datetime] = mapped_column(
-        DateTime,
+        DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
+        index=True,
     )
 
     meta: Mapped[dict | None] = mapped_column(
@@ -42,7 +45,7 @@ class Notification(Base):
     )
 
     read_at: Mapped[datetime | None] = mapped_column(
-        DateTime,
+        DateTime(timezone=True),
         nullable=True,
     )
 
