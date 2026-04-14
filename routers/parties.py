@@ -42,7 +42,7 @@ def _party_member_count(party: Party) -> int:
 def _service_original_price(service: Service | None) -> int | None:
     if service is None:
         return None
-    return service.original_price  
+    return service.original_price
 
 def _build_party_out(party: Party, current_user_id: Optional[uuid.UUID] = None) -> PartyOut:
     svc = party.service
@@ -52,6 +52,9 @@ def _build_party_out(party: Party, current_user_id: Optional[uuid.UUID] = None) 
         is_member = any(m.user_id == current_user_id for m in party.members) if party.members else False
         is_joined = is_leader or is_member
 
+    max_members = _party_max_members(party, svc)
+    monthly_price = round(svc.monthly_price / max_members) if svc and max_members else None  # 추가: 서비스에서 매번 계산
+
     return PartyOut(
         id=party.id,
         leader_id=party.leader_id,
@@ -59,11 +62,12 @@ def _build_party_out(party: Party, current_user_id: Optional[uuid.UUID] = None) 
         title=party.title,
         status=party.status,
         host_nickname=party.host.nickname if party.host else None,
+        host_trust_score=float(party.host.trust_score) if party.host and party.host.trust_score is not None else None,  # 추가
         service_name=svc.name if svc else None,
         category_name=svc.category if svc else None,
-        max_members=_party_max_members(party, svc),
-        monthly_price=party.monthly_per_person,
-        original_price=_service_original_price(svc),  
+        max_members=max_members,
+        monthly_price=monthly_price,
+        original_price=_service_original_price(svc),
         member_count=_party_member_count(party),
         logo_image_key=svc.logo_image_key if svc else None,
         logo_image_url=build_minio_asset_url(svc.logo_image_key) if svc else None,
@@ -94,11 +98,11 @@ async def list_services(db: AsyncSession = Depends(get_db)):
 async def list_categories(db: AsyncSession = Depends(get_db)):
     result = await db.execute(select(Service.category).distinct())
     categories = result.scalars().all()
-    return [{"name": cat} for cat in categories if cat]  
+    return [{"name": cat} for cat in categories if cat]
 
 @router.get("", response_model=PartyListOut)
 async def list_parties(
-    category_name: Optional[str] = Query(None), 
+    category_name: Optional[str] = Query(None),
     service_id: Optional[uuid.UUID] = Query(None),
     search: Optional[str] = Query(None),
     page: int = Query(1, ge=1),
@@ -114,7 +118,7 @@ async def list_parties(
     if service_id:
         q = q.where(Party.service_id == service_id)
     if category_name:
-        q = q.join(Party.service).where(Service.category == category_name) 
+        q = q.join(Party.service).where(Service.category == category_name)
     if search:
         q = q.where(Party.title.ilike(f"%{search}%"))
 
@@ -161,7 +165,6 @@ async def create_party(
 
     max_members = body.max_members if body.max_members is not None else svc.max_members
 
-    # 1인당 가격 = (전체요금 / 인원수) * (1 + 수수료율)
     base_per_person = svc.monthly_price / max_members
     commission = svc.commission_rate or 0.0
     monthly_per_person = round(base_per_person * (1 + commission))
