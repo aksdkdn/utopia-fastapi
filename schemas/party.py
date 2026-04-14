@@ -31,11 +31,12 @@ class PartyOut(BaseModel):
     title: str
     status: Optional[str]
     host_nickname: Optional[str] = None
+    host_trust_score: Optional[float] = None
     service_name: Optional[str] = None
     category_name: Optional[str] = None
     max_members: Optional[int] = None
     monthly_price: Optional[int] = None
-    original_price: Optional[int] = None  # 추가
+    original_price: Optional[int] = None
     logo_image_key: Optional[str] = None
     logo_image_url: Optional[str] = None
     member_count: int = 0
