@@ -76,8 +76,9 @@ CAPTCHA_SESSION_TTL_SECONDS = getattr(settings, "CAPTCHA_SESSION_TTL_SECONDS", 1
 CAPTCHA_TOKEN_TTL_SECONDS = getattr(settings, "CAPTCHA_TOKEN_TTL_SECONDS", 300)
 CAPTCHA_TOKEN_MAX_USES = getattr(settings, "CAPTCHA_TOKEN_MAX_USES", 3)
 CAPTCHA_MAX_ATTEMPTS = getattr(settings, "CAPTCHA_MAX_ATTEMPTS", 5)
-CAPTCHA_LOCK_SECONDS = getattr(settings, "CAPTCHA_LOCK_SECONDS", 1800)
-CAPTCHA_BAN_SECONDS = getattr(settings, "CAPTCHA_BAN_SECONDS", 86400)
+CAPTCHA_LOCK_SECONDS_1 = getattr(settings, "CAPTCHA_LOCK_SECONDS_1", 300)   # 1회차 잠금: 5분
+CAPTCHA_LOCK_SECONDS_2 = getattr(settings, "CAPTCHA_LOCK_SECONDS_2", 600)   # 2회차 잠금: 10분
+CAPTCHA_BAN_SECONDS = getattr(settings, "CAPTCHA_BAN_SECONDS", 86400)       # 3회차: 24시간 BAN
 CAPTCHA_WAIT_SECONDS = getattr(settings, "CAPTCHA_WAIT_SECONDS", 30)
 CAPTCHA_RATE_LIMIT_WINDOW_SECONDS = getattr(
     settings,
@@ -387,21 +388,26 @@ async def _mark_wait(client_ip: str) -> None:
 
 
 async def _mark_lock(client_ip: str) -> None:
-    await redis_client.setex(_lock_key(client_ip), CAPTCHA_LOCK_SECONDS, "LOCKED")
-    # 이번 수정: 잠금이 끝난 직후 첫 시도는 반드시 새 challenge로 돌려보내기 위해 플래그를 남깁니다.
-    await redis_client.setex(
-        _force_challenge_key(client_ip),
-        max(CAPTCHA_LOCK_SECONDS + CAPTCHA_SESSION_TTL_SECONDS, 60),
-        "FORCE_CHALLENGE",
-    )
-
     lock_count_key = _lock_count_key(client_ip)
-    current_count = await redis_client.incr(lock_count_key)
+    current_count = int(await redis_client.incr(lock_count_key))
     await redis_client.expire(lock_count_key, CAPTCHA_BAN_SECONDS)
 
-    # 같은 IP에서 잠금이 반복되면 하드 밴으로 올립니다.
-    if int(current_count) >= 3:
+    # 점진적 강화: 1회차 5분 → 2회차 10분 → 3회차 24시간 BAN
+    if current_count >= 3:
         await redis_client.setex(_ban_key(client_ip), CAPTCHA_BAN_SECONDS, "BANNED")
+        logger.info(f"[captcha.ban] ip={client_ip} lock_count={current_count} → 24h BAN")
+        return
+
+    lock_ttl = CAPTCHA_LOCK_SECONDS_1 if current_count <= 1 else CAPTCHA_LOCK_SECONDS_2
+    await redis_client.setex(_lock_key(client_ip), lock_ttl, "LOCKED")
+    logger.info(f"[captcha.lock] ip={client_ip} lock_count={current_count} → {lock_ttl}s LOCK")
+
+    # 잠금이 끝난 직후 첫 시도는 반드시 새 challenge로 돌려보내기 위해 플래그를 남깁니다.
+    await redis_client.setex(
+        _force_challenge_key(client_ip),
+        max(lock_ttl + CAPTCHA_SESSION_TTL_SECONDS, 60),
+        "FORCE_CHALLENGE",
+    )
 
 
 # ─────────────────────────────────────────────
