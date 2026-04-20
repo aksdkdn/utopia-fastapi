@@ -15,7 +15,7 @@ import httpx
 router = APIRouter(prefix="/payments", tags=["payments"])
 
 
-# ── get_current_user (auth.py에 없으므로 여기서 정의) ────────────
+# ── get_current_user ─────────────────────────────────────────────
 
 async def get_current_user(
     access_token: str | None = Cookie(default=None, alias="access_token"),
@@ -29,6 +29,8 @@ async def get_current_user(
         if not user_id_str:
             raise HTTPException(status_code=401, detail="유효하지 않은 토큰입니다.")
         user_id = uuid.UUID(user_id_str)
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=401, detail="유효하지 않은 토큰입니다.")
 
@@ -65,23 +67,37 @@ class PaymentOut(BaseModel):
         from_attributes = True
 
 
-# ── 포트원 결제 검증 ──────────────────────────────────────────────
+# ── 포트원 결제 검증 (실서비스 전환 시 주석 해제) ──────────────────
 
 async def verify_portone_payment(payment_id: str, expected_amount: int) -> dict:
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(
-            f"https://api.portone.io/payments/{payment_id}",
-            headers={"Authorization": f"PortOne {settings.PORTONE_API_SECRET}"},
-        )
-    if resp.status_code != 200:
-        raise HTTPException(status_code=400, detail="포트원 결제 조회 실패")
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(
+                f"https://api.portone.io/payments/{payment_id}",
+                headers={"Authorization": f"PortOne {settings.PORTONE_API_SECRET}"},
+            )
+        print(f"[PORTONE] status={resp.status_code} body={resp.text[:300]}")
 
-    data = resp.json()
-    if data.get("status") != "PAID":
-        raise HTTPException(status_code=400, detail="결제가 완료되지 않았습니다.")
-    if data.get("amount", {}).get("total") != expected_amount:
-        raise HTTPException(status_code=400, detail="결제 금액 불일치")
-    return data
+        if resp.status_code != 200:
+            raise HTTPException(status_code=400, detail=f"포트원 결제 조회 실패: {resp.text[:100]}")
+
+        data = resp.json()
+        portone_status = data.get("status")
+        portone_amount = data.get("amount", {}).get("total")
+
+        print(f"[PORTONE] payment status={portone_status}, amount={portone_amount}, expected={expected_amount}")
+
+        if portone_status != "PAID":
+            raise HTTPException(status_code=400, detail=f"결제 미완료 상태: {portone_status}")
+        if portone_amount != expected_amount:
+            raise HTTPException(status_code=400, detail=f"금액 불일치: 실제={portone_amount}, 요청={expected_amount}")
+
+        return data
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"[PORTONE ERROR] {e}")
+        raise HTTPException(status_code=400, detail=f"포트원 검증 중 오류: {str(e)}")
 
 
 # ── 카드 결제 승인 ────────────────────────────────────────────────
@@ -92,22 +108,24 @@ async def card_confirm(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    # 1. 포트원 서버 검증
+    print(f"[PAYMENT] card_confirm 요청: party_id={body.party_id}, pg_id={body.pg_transaction_id}, amount={body.amount}")
+    print(f"[PAYMENT] 유저: {current_user.id} / {current_user.nickname}")
+
+    # 포트원 검증 (테스트 중 문제 생기면 아래 줄 주석처리)
     await verify_portone_payment(body.pg_transaction_id, body.amount)
 
-    # 2. 중복 결제 방지
+    # 중복 결제 방지
     existing = await db.execute(
         select(Payment).where(Payment.pg_transaction_id == body.pg_transaction_id)
     )
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=409, detail="이미 처리된 결제입니다.")
 
-    # 3. 파티 존재 확인
+    # 파티 존재 확인
     party = await db.get(Party, body.party_id)
     if not party:
         raise HTTPException(status_code=404, detail="파티를 찾을 수 없습니다.")
 
-    # 4. 결제 레코드 생성 → 즉시 approved
     now = datetime.now(timezone.utc)
     commission_rate = 0.10
     payment = Payment(
@@ -128,6 +146,8 @@ async def card_confirm(
     db.add(payment)
     await db.commit()
     await db.refresh(payment)
+
+    print(f"[PAYMENT] 저장 완료: payment_id={payment.id}, status={payment.status}")
     return payment
 
 
@@ -139,6 +159,9 @@ async def transfer_register(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    print(f"[PAYMENT] transfer_register 요청: party_id={body.party_id}, amount={body.amount}")
+    print(f"[PAYMENT] 유저: {current_user.id} / {current_user.nickname}")
+
     party = await db.get(Party, body.party_id)
     if not party:
         raise HTTPException(status_code=404, detail="파티를 찾을 수 없습니다.")
@@ -163,6 +186,8 @@ async def transfer_register(
     db.add(payment)
     await db.commit()
     await db.refresh(payment)
+
+    print(f"[PAYMENT] 저장 완료: payment_id={payment.id}, status={payment.status}")
     return payment
 
 
@@ -186,4 +211,6 @@ async def approve_transfer(
     payment.status = "approved"
     payment.paid_at = datetime.now(timezone.utc)
     await db.commit()
+
+    print(f"[PAYMENT] 관리자 승인: payment_id={payment_id}")
     return {"message": "승인 완료", "payment_id": str(payment_id)}
