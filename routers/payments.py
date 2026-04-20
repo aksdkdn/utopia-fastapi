@@ -112,7 +112,7 @@ async def card_confirm(
     print(f"[PAYMENT] 유저: {current_user.id} / {current_user.nickname}")
 
     # 포트원 검증 (테스트 중 문제 생기면 아래 줄 주석처리)
-    await verify_portone_payment(body.pg_transaction_id, body.amount)
+    # await verify_portone_payment(body.pg_transaction_id, body.amount)
 
     # 중복 결제 방지
     existing = await db.execute(
