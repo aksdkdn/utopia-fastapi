@@ -438,6 +438,7 @@ async def _apply_status_by_score(user_id: str, score: float, warn_count: int) ->
 
 async def _ban_user_ip(user_id: str) -> None:
     try:
+        from services.notification_ws_service import notification_connection_manager
         user_uuid = uuid.UUID(user_id)
         async with AsyncSessionLocal() as db:
             ip_result = await db.execute(
@@ -450,8 +451,33 @@ async def _ban_user_ip(user_id: str) -> None:
                 .limit(1)
             )
             ip = ip_result.scalar_one_or_none()
-            if ip:
-                await redis_client.set(f"ip:banned:{ip}", "1", ex=60 * 60 * 24 * 30)
+            if not ip:
+                return
+
+            # 무기한 IP 밴
+            await redis_client.set(f"ip:banned:{ip}", "1")
+
+            # 같은 IP로 접속 중인 유저 전원 처리
+            same_ip_users = notification_connection_manager.get_users_by_ip(ip)
+            # 원인 제공자도 포함
+            same_ip_users.add(user_id)
+
+            for uid_str in same_ip_users:
+                try:
+                    uid = uuid.UUID(uid_str)
+                    # RefreshToken 전부 삭제 (강제 로그아웃)
+                    await db.execute(
+                        RefreshToken.__table__.delete().where(RefreshToken.user_id == uid)
+                    )
+                    # 알림 WS로 ip_banned 전송
+                    await notification_connection_manager.send_to_user(uid, {
+                        "type": "ip_banned",
+                        "content": "같은 IP 사용자의 규정 위반으로 접속이 차단되었습니다.",
+                    })
+                except Exception as e:
+                    print(f"[BAN IP USER ERROR] uid={uid_str} {e}")
+
+            await db.commit()
     except Exception as e:
         print(f"[BAN IP ERROR] {e}")
 

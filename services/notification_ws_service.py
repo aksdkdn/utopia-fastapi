@@ -8,10 +8,16 @@ from fastapi import WebSocket
 class NotificationConnectionManager:
     def __init__(self) -> None:
         self._connections: dict[str, set[WebSocket]] = defaultdict(set)
+        self._ip_to_users: dict[str, set[str]] = defaultdict(set)  # IP → user_id 집합
+        self._user_to_ip: dict[str, str] = {}  # user_id → IP
 
-    async def connect(self, user_id: UUID, websocket: WebSocket) -> None:
+    async def connect(self, user_id: UUID, websocket: WebSocket, ip: str | None = None) -> None:
         await websocket.accept()
-        self._connections[str(user_id)].add(websocket)
+        user_key = str(user_id)
+        self._connections[user_key].add(websocket)
+        if ip:
+            self._ip_to_users[ip].add(user_key)
+            self._user_to_ip[user_key] = ip
 
     def disconnect(self, user_id: UUID, websocket: WebSocket) -> None:
         user_key = str(user_id)
@@ -22,6 +28,16 @@ class NotificationConnectionManager:
 
         if not self._connections[user_key]:
             del self._connections[user_key]
+            # IP 역방향 매핑도 정리
+            ip = self._user_to_ip.pop(user_key, None)
+            if ip:
+                self._ip_to_users[ip].discard(user_key)
+                if not self._ip_to_users[ip]:
+                    del self._ip_to_users[ip]
+
+    def get_users_by_ip(self, ip: str) -> set[str]:
+        """해당 IP로 현재 접속 중인 user_id 집합 반환"""
+        return set(self._ip_to_users.get(ip, set()))
 
     async def send_to_user(self, user_id: UUID, payload: dict) -> None:
         user_key = str(user_id)
