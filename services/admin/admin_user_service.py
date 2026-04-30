@@ -108,3 +108,159 @@ async def update_admin_user_recommender_service(
     await db.refresh(target_user)
 
     return target_user
+
+
+
+# 운영/제재 이력
+from typing import Any
+from uuid import UUID
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from models.admin import ActivityLog, ModerationAction
+from models.report import Report
+from models.user import User
+
+
+def _meta(row: ActivityLog) -> dict[str, Any]:
+    return row.extra_metadata or {}
+
+
+def _operation_type_from_activity(action_type: str) -> str | None:
+    if action_type.startswith("STATUS_"):
+        return "STATUS_CHANGE"
+    if action_type == "TRUST_SCORE_UPDATED":
+        return "TRUST_SCORE_CHANGE"
+    if action_type in {"REFERRER_UPDATED", "ADMIN_USER_REFERRER_UPDATE"}:
+        return "RECOMMENDER_CHANGE"
+    return None
+
+
+async def get_admin_user_operation_logs_service(
+    db: AsyncSession,
+    *,
+    target_user_id: UUID,
+    limit: int = 50,
+) -> dict:
+    target_user = await db.get(User, target_user_id)
+    if not target_user:
+        return {"logs": [], "total": 0}
+
+    activity_rows = (
+        await db.execute(
+            select(ActivityLog)
+            .where(ActivityLog.target_id == target_user_id)
+            .where(
+                ActivityLog.action_type.in_(
+                    [
+                        "STATUS_정상",
+                        "STATUS_주의",
+                        "STATUS_정지",
+                        "TRUST_SCORE_UPDATED",
+                        "REFERRER_UPDATED",
+                        "ADMIN_USER_REFERRER_UPDATE",
+                    ]
+                )
+            )
+            .order_by(ActivityLog.created_at.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+
+    moderation_rows = (
+        await db.execute(
+            select(ModerationAction)
+            .where(ModerationAction.user_id == target_user_id)
+            .order_by(ModerationAction.created_at.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+
+    report_rows = (
+        await db.execute(
+            select(Report)
+            .where(
+                (Report.target_id == target_user_id)
+                | (Report.reporter_id == target_user_id)
+            )
+            .order_by(Report.created_at.desc())
+            .limit(limit)
+        )
+    ).scalars().all()
+
+    logs: list[dict] = []
+
+    for row in activity_rows:
+        log_type = _operation_type_from_activity(row.action_type)
+        if not log_type:
+            continue
+
+        metadata = _meta(row)
+
+        logs.append(
+            {
+                "id": str(row.id),
+                "type": log_type,
+                "userId": str(target_user_id),
+                "beforeStatus": metadata.get("beforeStatus"),
+                "afterStatus": (
+                    row.action_type.replace("STATUS_", "")
+                    if row.action_type.startswith("STATUS_")
+                    else metadata.get("afterStatus")
+                ),
+                "beforeTrustScore": metadata.get("beforeTrustScore"),
+                "afterTrustScore": metadata.get("afterTrustScore"),
+                "beforeRecommenderId": metadata.get("beforeRecommenderId"),
+                "afterRecommenderId": metadata.get("afterRecommenderId"),
+                "reason": metadata.get("reason") or row.description,
+                "adminId": str(row.actor_user_id) if row.actor_user_id else None,
+                "createdAt": row.created_at.isoformat() if row.created_at else "",
+            }
+        )
+
+    for row in moderation_rows:
+        logs.append(
+            {
+                "id": str(row.id),
+                "type": "SANCTION",
+                "userId": str(target_user_id),
+                "sanctionType": row.action_type,
+                "sanctionDurationDays": (
+                    row.duration_minutes // 1440
+                    if row.duration_minutes
+                    else None
+                ),
+                "reason": row.reason,
+                "adminId": str(row.admin_id) if row.admin_id else None,
+                "createdAt": row.created_at.isoformat() if row.created_at else "",
+            }
+        )
+
+    for row in report_rows:
+        is_reporter = row.reporter_id == target_user_id
+
+        logs.append(
+            {
+                "id": str(row.id),
+                "type": "REPORT_CREATED" if is_reporter else "REPORT_RECEIVED",
+                "userId": str(target_user_id),
+                "reportId": str(row.id),
+                "reportReason": row.category,
+                "reportTargetUserId": (
+                    str(row.target_id)
+                    if row.target_type == "USER"
+                    else None
+                ),
+                "reason": row.description,
+                "adminId": str(row.reviewed_by) if row.reviewed_by else None,
+                "createdAt": row.created_at.isoformat() if row.created_at else "",
+            }
+        )
+
+    logs.sort(key=lambda item: item["createdAt"], reverse=True)
+
+    return {
+        "logs": logs[:limit],
+        "total": len(logs),
+    }

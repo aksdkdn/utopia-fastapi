@@ -64,6 +64,7 @@ from schemas.admin import (
     SettlementRecordOut,
     SystemLogRecordOut,
     UserStatusLogOut,
+    AdminOperationLogListOut,
 )
 from services.notifications.report_notification_service import (
     notify_report_result_to_reporter,
@@ -71,6 +72,7 @@ from services.notifications.report_notification_service import (
     notify_report_penalty_to_target,
 )
 
+from services.admin.admin_user_service import get_admin_user_operation_logs_service
 from .deps import (
     AdminContext,
     require_admin_context,
@@ -319,6 +321,26 @@ async def get_admin_user_detail(
         ],
     )
 
+
+@router.get(
+    "/users/{user_id}/operation-logs",
+    response_model=AdminOperationLogListOut,
+)
+async def get_admin_user_operation_logs(
+    user_id: str,
+    _: AdminContext = Depends(require_admin_user_permission),
+    db: AsyncSession = Depends(get_db),
+):
+    user_uuid = _parse_user_id_or_400(user_id)
+
+    target_user = await db.get(User, user_uuid)
+    if not target_user:
+        raise HTTPException(status_code=404, detail="사용자를 찾을 수 없습니다.")
+
+    return await get_admin_user_operation_logs_service(
+        db,
+        target_user_id=user_uuid,
+    )
 
 @router.get("/services", response_model=list[AdminServiceRecordOut])
 async def get_admin_services(

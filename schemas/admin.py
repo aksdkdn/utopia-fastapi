@@ -355,3 +355,34 @@ class UserStatusLogOut(BaseModel):
     reason: str | None = None
     trigger: str
     createdAt: str
+
+
+class AdminOperationLogOut(BaseModel):
+    id: str
+    type: str
+    userId: str
+
+    beforeStatus: str | None = None
+    afterStatus: str | None = None
+
+    sanctionType: str | None = None
+    sanctionDurationDays: int | None = None
+
+    reportId: str | None = None
+    reportReason: str | None = None
+    reportTargetUserId: str | None = None
+
+    beforeTrustScore: float | None = None
+    afterTrustScore: float | None = None
+
+    beforeRecommenderId: str | None = None
+    afterRecommenderId: str | None = None
+
+    reason: str | None = None
+    adminId: str | None = None
+    createdAt: str
+
+
+class AdminOperationLogListOut(BaseModel):
+    logs: list[AdminOperationLogOut]
+    total: int
