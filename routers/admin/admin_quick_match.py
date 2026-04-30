@@ -570,3 +570,81 @@ async def run_quick_match_embedding_backfill(
         success=True,
         message=f"파티 임베딩 백필 완료: {count}건",
     )
+
+# 사용자 임베딩 백필
+@router.post(
+    "/users/embedding-backfill",
+    response_model=AdminQuickMatchActionResponse,
+)
+async def run_user_quick_match_embedding_backfill(
+    db: AsyncSession = Depends(get_db),
+    _: User = Depends(require_admin_user),
+):
+    requests_result = await db.execute(
+        select(QuickMatchRequest)
+        .order_by(QuickMatchRequest.requested_at.desc())
+    )
+    requests = requests_result.scalars().all()
+
+    seen: set[tuple[uuid.UUID, uuid.UUID]] = set()
+    count = 0
+    failed = 0
+
+    for request in requests:
+        key = (request.user_id, request.service_id)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        user = await db.get(User, request.user_id)
+        if not user:
+            failed += 1
+            continue
+
+        ai_profile = await quick_match_service._build_user_ai_profile(
+            db=db,
+            user=user,
+            service_id=request.service_id,
+            preferred_conditions=request.preferred_conditions or {},
+        )
+
+        embedding_text = EmbeddingService.serialize_user_profile_text(ai_profile)
+        embedding_vector = await EmbeddingService.generate_embedding(
+            {"text": embedding_text}
+        )
+
+        if not embedding_vector:
+            failed += 1
+            continue
+
+        existing_result = await db.execute(
+            select(PartyMatchEmbedding).where(
+                PartyMatchEmbedding.user_id == request.user_id,
+                PartyMatchEmbedding.service_id == request.service_id,
+            )
+        )
+        embedding = existing_result.scalar_one_or_none()
+
+        if embedding:
+            embedding.embedding_vector = embedding_vector
+            embedding.source_snapshot = ai_profile
+            embedding.last_generated_at = datetime.now(timezone.utc)
+        else:
+            db.add(
+                PartyMatchEmbedding(
+                    user_id=request.user_id,
+                    service_id=request.service_id,
+                    embedding_vector=embedding_vector,
+                    source_snapshot=ai_profile,
+                    last_generated_at=datetime.now(timezone.utc),
+                )
+            )
+
+        count += 1
+
+    await db.commit()
+
+    return AdminQuickMatchActionResponse(
+        success=True,
+        message=f"사용자 임베딩 백필 완료: {count}건 / 실패: {failed}건",
+    )
