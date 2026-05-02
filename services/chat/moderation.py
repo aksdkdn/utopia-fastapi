@@ -6,6 +6,7 @@ from datetime import datetime, timezone, timedelta
 from fastapi import WebSocket
 from sqlalchemy import select, update
 
+from core.config import settings
 from core.database import AsyncSessionLocal
 from models.party import Party, PartyMember, PartyChat
 from models.user import User
