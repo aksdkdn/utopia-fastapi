@@ -32,7 +32,6 @@ from services.chat.serializers import (
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 
-
 # ── REST 엔드포인트 ──────────────────────────────────────────
 
 @router.get("/parties/{party_id}/messages")
@@ -228,11 +227,13 @@ async def websocket_chat(
     await manager.connect(party_id, ws, safe_user_id)
 
     if safe_user_id != "guest":
-        await mark_all_read(party_id, safe_user_id)
-        await manager.broadcast(party_id, {
-            "type": "read_update",
-            "user_id": safe_user_id,
-        })
+        newly_read = await mark_all_read(party_id, safe_user_id)
+        if newly_read:
+            await manager.broadcast(party_id, {
+                "type": "read_update",
+                "user_id": safe_user_id,
+                "chat_ids": newly_read,
+            })
 
     try:
         while True:
