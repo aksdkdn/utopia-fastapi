@@ -6,7 +6,6 @@ from datetime import datetime, timezone, timedelta
 from fastapi import WebSocket
 from sqlalchemy import select, update
 
-from core.config import settings
 from core.database import AsyncSessionLocal
 from models.party import Party, PartyMember, PartyChat
 from models.user import User
@@ -14,11 +13,9 @@ from models.refresh_token import RefreshToken
 from services.chat.connection_manager import manager
 from services.chat.serializers import warn_key, redis_msg_key, blocked_key
 
-import redis.asyncio as aioredis
+from services.chat.redis_client import redis_client, REDIS_TTL
 
-redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
 
-REDIS_TTL = 60 * 60 * 24 * 3
 OLLAMA_URL = settings.OLLAMA_URL
 OLLAMA_MODEL = settings.OLLAMA_MODEL
 ML_SERVER_URL = settings.ML_SERVER_URL
