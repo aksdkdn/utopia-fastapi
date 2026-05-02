@@ -3,7 +3,6 @@ import json
 import uuid
 from datetime import datetime, timezone
 
-import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +14,7 @@ from core.security import get_current_user_optional
 from models.party import Party, PartyChat, PartyMember, ChatReadStatus
 from models.payment import Payment
 from models.user import User
+from services.chat.redis_client import redis_client, REDIS_TTL
 from services.chat.connection_manager import manager
 from services.chat.moderation import moderate_in_background
 from services.chat.read_status import _get_total_member_count, mark_all_read, mark_read_for_users
@@ -31,8 +31,6 @@ from services.chat.serializers import (
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
-redis_client = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
-REDIS_TTL = 60 * 60 * 24 * 3
 
 
 # ── REST 엔드포인트 ──────────────────────────────────────────
