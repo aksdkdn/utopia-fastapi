@@ -37,8 +37,13 @@ async def _get_total_member_count(party_id: str) -> int:
         return 1
 
 
-async def mark_all_read(party_id: str, user_id: str) -> None:
-    """입장 시 해당 파티의 모든 메시지를 읽음 처리"""
+async def mark_all_read(party_id: str, user_id: str) -> list[str]:
+    """
+    입장 시 해당 파티의 모든 메시지를 읽음 처리.
+    실제로 새로 읽은(기존에 안 읽었던) chat_id 목록만 반환.
+    재입장 시 이미 읽은 건 rowcount=0 이므로 반환값에 포함 안 됨.
+    """
+    newly_read: list[str] = []
     try:
         user_uuid = uuid.UUID(user_id)
         async with AsyncSessionLocal() as db:
@@ -54,14 +59,21 @@ async def mark_all_read(party_id: str, user_id: str) -> None:
                     chat_id=cid,
                     user_id=user_uuid,
                 ).on_conflict_do_nothing(constraint=UNIQUE_CONSTRAINT)
-                await db.execute(stmt)
+                result = await db.execute(stmt)
+                if result.rowcount > 0:
+                    newly_read.append(str(cid))
             await db.commit()
     except Exception as e:
         print(f"[READ ON CONNECT ERROR] {e}")
+    return newly_read
 
 
-async def mark_read_for_users(chat_id: uuid.UUID, user_ids: list[uuid.UUID]) -> None:
-    """메시지 전송 시 지정된 유저들을 읽음 처리"""
+async def mark_read_for_users(chat_id: uuid.UUID, user_ids: list[uuid.UUID]) -> list[str]:
+    """
+    메시지 전송 시 지정된 유저들을 읽음 처리.
+    실제로 새로 읽음 처리된 user_id(str) 목록 반환.
+    """
+    newly_read_users: list[str] = []
     try:
         async with AsyncSessionLocal() as db:
             for uid in user_ids:
@@ -69,7 +81,10 @@ async def mark_read_for_users(chat_id: uuid.UUID, user_ids: list[uuid.UUID]) -> 
                     chat_id=chat_id,
                     user_id=uid,
                 ).on_conflict_do_nothing(constraint=UNIQUE_CONSTRAINT)
-                await db.execute(stmt)
+                result = await db.execute(stmt)
+                if result.rowcount > 0:
+                    newly_read_users.append(str(uid))
             await db.commit()
     except Exception as e:
         print(f"[MARK READ ERROR] {e}")
+    return newly_read_users
