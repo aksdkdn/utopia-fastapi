@@ -5,7 +5,7 @@ import httpx
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 from sqlalchemy.orm import selectinload
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 import redis.asyncio as aioredis
@@ -591,8 +591,6 @@ async def moderate_in_background(party_id: str, user_id: str, content: str, ws: 
 
 # ── 일반 API 엔드포인트 ──────────────────────────────────────
 
-from sqlalchemy import func
-
 @router.get("/parties/{party_id}/messages")
 async def get_messages(party_id: uuid.UUID, db: AsyncSession = Depends(get_db)):
     result = await db.execute(
@@ -892,9 +890,10 @@ async def websocket_chat(
             except Exception as db_err:
                 print(f"[DB ERROR] {db_err}")
 
-            # unread_count = 전체 멤버 수 - 현재 온라인(읽은) 인원
+            # unread_count = 전체 멤버 수 - 현재 온라인 인원 (guest 제외)
             total_cnt = await _get_total_member_count(party_id)
-            online_count = len([u for u in manager.get_online_user_ids(party_id) if u != "guest"])
+            online_ids = manager.get_online_user_ids(party_id)
+            online_count = len([u for u in online_ids if u != "guest"])
             message["chat_id"] = chat_id_str
             message["unread_count"] = max(0, total_cnt - online_count)
 
