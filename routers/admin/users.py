@@ -71,6 +71,7 @@ from services.notifications.report_notification_service import (
     notify_report_warning_to_target,
     notify_report_penalty_to_target,
 )
+from services.notification_ws_service import notification_connection_manager
 
 from services.admin.admin_user_service import get_admin_user_operation_logs_service
 from .deps import (
@@ -461,6 +462,19 @@ async def update_admin_user_status(
     )
     await db.commit()
     await db.refresh(target_user)
+
+    # 정지 처리 시 웹소켓으로 강제 로그아웃 발송
+    if payload.status == "정지":
+        from datetime import timezone as tz
+        await notification_connection_manager.send_to_user(
+            target_user.id,
+            {
+                "type": "force_logout",
+                "ban_type": "manual",
+                "content": "관리자에 의해 계정이 정지되었습니다.",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
 
     report_count = await db.scalar(
         select(func.count())

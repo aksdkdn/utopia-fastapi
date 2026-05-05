@@ -223,7 +223,7 @@ async def _ban_user_in_db(party_id: str, user_id: str) -> None:
         print(f"[BAN DB ERROR] {e}")
 
 
-async def _apply_trust_penalty(user_id: str, delta: float, reason: str) -> float:
+async def _apply_trust_penalty(user_id: str, delta: float, reason: str) -> tuple[float, str | None]:
     try:
         from models.mypage.trust_score import TrustScore
         user_uuid = uuid.UUID(user_id)
@@ -231,23 +231,26 @@ async def _apply_trust_penalty(user_id: str, delta: float, reason: str) -> float
             result = await db.execute(select(User).where(User.id == user_uuid))
             user = result.scalar_one_or_none()
             if not user:
-                return 36.5
+                return 36.5, None
             previous = float(user.trust_score) if user.trust_score is not None else 36.5
             new_score = max(0.0, round(previous + delta, 1))
             user.trust_score = new_score
-            db.add(TrustScore(
+            row = TrustScore(
                 user_id=user_uuid,
                 previous_score=previous,
                 new_score=new_score,
                 change_amount=round(new_score - previous, 1),
                 reason=reason,
                 created_by=user_uuid,
-            ))
+            )
+            db.add(row)
+            await db.flush()
+            trust_id = str(row.id)
             await db.commit()
-            return new_score
+            return new_score, trust_id
     except Exception as e:
         print(f"[TRUST PENALTY ERROR] {e}")
-        return 36.5
+        return 36.5, None
 
 
 async def _increment_chat_warn_count(user_id: str) -> int:
@@ -347,7 +350,7 @@ async def moderate_in_background(party_id: str, user_id: str, content: str, ws: 
         await delete_message_from_redis(party_id, content)
         await delete_message_from_db(party_id, user_id, content)
         await _ban_user_in_db(party_id, user_id)
-        new_score = await _apply_trust_penalty(user_id, -5.0, f"심한 욕설 감지: {moderation['reason']}")
+        new_score, trust_ref_id = await _apply_trust_penalty(user_id, -5.0, f"심한 욕설 감지: {moderation['reason']}")
         total_warn = await _increment_chat_warn_count(user_id)
         wk = warn_key(party_id, user_id)
         await redis_client.incr(wk)
@@ -366,6 +369,8 @@ async def moderate_in_background(party_id: str, user_id: str, content: str, ws: 
         })
         await manager.send_personal(ws, {
             "type": "force_logout",
+            "ban_type": "trust_score",
+            "reference_id": trust_ref_id,
             "content": "심각한 위반으로 계정이 정지되었습니다.",
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
@@ -384,7 +389,7 @@ async def moderate_in_background(party_id: str, user_id: str, content: str, ws: 
         wk = warn_key(party_id, user_id)
         party_warn = int(await redis_client.incr(wk))
         await redis_client.expire(wk, REDIS_TTL)
-        new_score = await _apply_trust_penalty(user_id, -1.0, f"욕설 감지: {moderation['reason']}")
+        new_score, trust_ref_id = await _apply_trust_penalty(user_id, -1.0, f"욕설 감지: {moderation['reason']}")
         total_warn = await _increment_chat_warn_count(user_id)
         await _flag_chat_in_db(
             party_id, user_id, content,
@@ -403,6 +408,8 @@ async def moderate_in_background(party_id: str, user_id: str, content: str, ws: 
             })
             await manager.send_personal(ws, {
                 "type": "force_logout",
+                "ban_type": "trust_score",
+                "reference_id": trust_ref_id,
                 "content": "경고 누적으로 계정이 정지되었습니다.",
                 "created_at": datetime.now(timezone.utc).isoformat(),
             })
