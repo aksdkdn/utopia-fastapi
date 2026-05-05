@@ -22,6 +22,7 @@ from services.notifications.report_notification_service import (
     notify_report_result_to_target,
     notify_report_warning_to_target,
 )
+from services.notification_ws_service import notification_connection_manager
 from services.report_storage_service import get_report_file_bytes
 
 
@@ -135,13 +136,13 @@ async def _apply_report_penalty(
     *,
     report: Report,
     reviewer_id: UUID,
-) -> tuple[float | None, int | None]:
+) -> tuple[float | None, int | None, TrustScore | None]:
     if report.target_type != "USER":
-        return None, None
+        return None, None, None
 
     target_user = await db.get(User, report.target_id)
     if not target_user:
-        return None, None
+        return None, None, None
 
     penalty = _resolve_auto_report_penalty(report)
     previous_score = (
@@ -166,22 +167,22 @@ async def _apply_report_penalty(
     else:
         report.action_result_code = "WARNING"
 
-    db.add(
-        TrustScore(
-            user_id=target_user.id,
-            previous_score=previous_score,
-            new_score=new_score,
-            change_amount=round(new_score - previous_score, 1),
-            reason=f"신고 승인: {report.category}",
-            reference_id=report.id,
-            created_by=reviewer_id,
-        )
+    trust_row = TrustScore(
+        user_id=target_user.id,
+        previous_score=previous_score,
+        new_score=new_score,
+        change_amount=round(new_score - previous_score, 1),
+        reason=f"신고 승인: {report.category}",
+        reference_id=report.id,
+        created_by=reviewer_id,
     )
+    db.add(trust_row)
+    await db.flush()  # id 확정
 
     report.admin_memo = (
         f"자동 신뢰도 차감 {abs(penalty):.1f}점 적용 / 현재 {new_score:.1f}점"
     )
-    return new_score, warn_count
+    return new_score, warn_count, trust_row
 
 
 async def ensure_admin_can_manage_reports(current_user: User) -> None:
@@ -290,8 +291,9 @@ async def update_admin_report_status(
 
     new_score: float | None = None
     warn_count: int | None = None
+    trust_row = None
     if previous_status != "APPROVED" and next_status == "APPROVED":
-        new_score, warn_count = await _apply_report_penalty(
+        new_score, warn_count, trust_row = await _apply_report_penalty(
             db,
             report=report,
             reviewer_id=current_user.id,
@@ -332,6 +334,17 @@ async def update_admin_report_status(
                         if updated_report.action_result_code == "PERMANENT_BAN"
                         else "TEMP_BAN_30_DAYS"
                     ),
+                )
+                # 정지 확정 시 웹소켓으로 강제 로그아웃 발송
+                await notification_connection_manager.send_to_user(
+                    updated_report.target_id,
+                    {
+                        "type": "force_logout",
+                        "ban_type": "report",
+                        "reference_id": str(trust_row.id) if trust_row else None,
+                        "content": "신고 처리 결과로 계정이 정지되었습니다.",
+                        "created_at": datetime.now(timezone.utc).isoformat(),
+                    },
                 )
             else:
                 await notify_report_warning_to_target(

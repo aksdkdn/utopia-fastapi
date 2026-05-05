@@ -27,6 +27,7 @@ from routers.quick_match import router as quick_match_router
 from routers.admin_moderation_config import router as admin_mod_config_router
 from routers.admin.cloud_monitor import router as admin_cloud_monitor_router
 from routers.admin import admin_quick_match
+from routers.appeal import router as appeal_router
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -278,6 +279,8 @@ app.include_router(referrers.router, prefix="/api")
 app.include_router(admin_mod_config_router, prefix="/api")
 app.include_router(admin_cloud_monitor_router, prefix="/api")
 app.include_router(admin_quick_match.router, prefix="/api")
+
+app.include_router(appeal_router)
 # admin handocr
 app.include_router(admin_handocr.router, prefix="/api")
 
