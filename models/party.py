@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, func, text
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, Index, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from core.database import Base
@@ -122,6 +122,28 @@ class PartyChat(Base):
 
     party: Mapped["Party"] = relationship("Party", back_populates="chats")
     sender: Mapped["User"] = relationship("User", foreign_keys=[sender_id])
+
+
+class ChatReadStatus(Base):
+    __tablename__ = "chat_read_status"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    chat_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("party_chats.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    read_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("chat_id", "user_id", name="chat_read_status_chat_id_user_id_key"),
+        Index("idx_chat_read_status_chat_id", "chat_id"),
+    )
 
 
 class Service(Base):
