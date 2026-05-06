@@ -8,6 +8,7 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from jose import JWTError, jwt
 from sqlalchemy import text
 
@@ -15,7 +16,7 @@ from core.config import settings
 from core.database import AsyncSessionLocal, Base, engine
 from models.admin import ActivityLog
 
-from routers import admin, assets, auth, behavior_captcha, captcha, chat, notifications, parties, report, ws_notifications, payments, admin_handocr, praises, search
+from routers import admin, assets, auth, behavior_captcha, captcha, chat, notifications, parties, report, ws_notifications, payments, admin_handocr, praises, search, siteverify
 
 from routers.mypage import profile, trust_history
 from routers.user import referrers
@@ -264,6 +265,7 @@ app.include_router(chat.router, prefix="/api")
 # 상원: 1차 행동 캡챠는 behavior_captcha 라우터로, 2차 handOCR 캡챠는 captcha 라우터로 각각 등록합니다.
 app.include_router(behavior_captcha.router, prefix="/api")  # 상원
 app.include_router(captcha.router, prefix="/api")
+app.include_router(siteverify.router)  # 상원: SaaS B2 siteverify (prefix는 라우터 내부에서 설정)
 app.include_router(assets.router, prefix="/api", tags=["Assets"])
 # 상원: 관리자 페이지가 실제 데이터를 읽고 상태를 바꿀 수 있도록 관리자 라우터를 연결합니다.
 app.include_router(admin.router, prefix="/api")  # 상원
@@ -289,6 +291,11 @@ app.include_router(praises.router, prefix='/api')
 
 # 실검
 app.include_router(search.router, prefix='/api')
+
+# ── SDK 정적 파일 서빙 (/sdk/partyup-captcha.js) ──
+_sdk_dir = Path(__file__).resolve().parent.parent / "sdk"
+if _sdk_dir.is_dir():
+    app.mount("/sdk", StaticFiles(directory=str(_sdk_dir)), name="sdk")
 
 @app.get("/api/health")
 async def health():
