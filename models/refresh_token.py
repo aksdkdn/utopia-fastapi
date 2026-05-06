@@ -38,10 +38,24 @@ class RefreshToken(Base):
         nullable=True,
     )
 
+    replaced_by_token_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("refresh_tokens.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
     ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
+    # absolute lifetime 기준 만료 시각
     expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+
+    # inactivity timeout 기준 마지막 사용 시각
+    last_used_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         index=True,
@@ -61,4 +75,15 @@ class RefreshToken(Base):
     )
 
     user = relationship("User", backref="refresh_tokens")
-    parent_token = relationship("RefreshToken", remote_side=[id])
+
+    parent_token = relationship(
+        "RefreshToken",
+        remote_side=[id],
+        foreign_keys=[parent_token_id],
+    )
+
+    replaced_by_token = relationship(
+        "RefreshToken",
+        remote_side=[id],
+        foreign_keys=[replaced_by_token_id],
+    )

@@ -2,7 +2,7 @@ import secrets
 import hashlib
 import uuid
 
-from sqlalchemy import select, update, func
+from sqlalchemy import select, update
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 from uuid import UUID
@@ -17,10 +17,14 @@ from models.refresh_token import RefreshToken
 from models.user import User, UserReferrer
 from core.config import settings
 
+
 SECRET_KEY = settings.SECRET_KEY
 ALGORITHM = settings.ALGORITHM
+
 ACCESS_TOKEN_EXPIRE_MINUTES = settings.ACCESS_TOKEN_EXPIRE_MINUTES
-REFRESH_TOKEN_EXPIRE_DAYS = settings.REFRESH_TOKEN_EXPIRE_DAYS
+REFRESH_INACTIVITY_TIMEOUT_DAYS = settings.REFRESH_INACTIVITY_TIMEOUT_DAYS
+REFRESH_ABSOLUTE_LIFETIME_DAYS = settings.REFRESH_ABSOLUTE_LIFETIME_DAYS
+REFRESH_ROTATION_GRACE_SECONDS = settings.REFRESH_ROTATION_GRACE_SECONDS
 
 COOKIE_SECURE = settings.COOKIE_SECURE
 COOKIE_SAMESITE = settings.COOKIE_SAMESITE
@@ -29,6 +33,16 @@ ACCESS_TOKEN_COOKIE_NAME = "access_token"
 REFRESH_TOKEN_COOKIE_NAME = "refresh_token"
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def ensure_aware(dt: datetime) -> datetime:
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def get_password_hash(password: str) -> str:
@@ -41,7 +55,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + (
+    expire = utc_now() + (
         expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     )
     to_encode.update({"exp": expire, "type": "access"})
@@ -93,47 +107,28 @@ def hash_refresh_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def get_refresh_token_expiry(expires_delta: Optional[timedelta] = None) -> datetime:
-    return datetime.now(timezone.utc) + (
-        expires_delta or timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
-    )
+def get_refresh_absolute_expiry() -> datetime:
+    return utc_now() + timedelta(days=REFRESH_ABSOLUTE_LIFETIME_DAYS)
 
 
-async def issue_tokens_and_save(
-    response: Response,
-    db: AsyncSession,
-    user: User,
-    user_agent: str | None = None,
-    ip_address: str | None = None,
-) -> None:
-    access_token = create_access_token(data={"sub": str(user.id)})
-    refresh_token = create_refresh_token()
-
-    refresh_token_row = RefreshToken(
-        user_id=user.id,
-        token_hash=hash_refresh_token(refresh_token),
-        family_id=uuid.uuid4(),
-        parent_token_id=None,
-        user_agent=user_agent,
-        ip_address=ip_address,
-        expires_at=get_refresh_token_expiry(),
-        revoked_at=None,
-        revoke_reason=None,
-        created_at=datetime.now(timezone.utc),
-    )
-
-    db.add(refresh_token_row)
-    user.last_login_at = datetime.now(timezone.utc)
-
-    await db.commit()
-
-    set_access_token_cookie(response, access_token)
-    set_refresh_token_cookie(response, refresh_token)
+def is_refresh_absolute_expired(token_row: RefreshToken) -> bool:
+    return ensure_aware(token_row.expires_at) <= utc_now()
 
 
-def revoke_refresh_token(token_row: RefreshToken, reason: str) -> None:
-    token_row.revoked_at = datetime.now(timezone.utc)
-    token_row.revoke_reason = reason
+def is_refresh_inactive(token_row: RefreshToken) -> bool:
+    last_used_at = ensure_aware(token_row.last_used_at)
+    return last_used_at + timedelta(days=REFRESH_INACTIVITY_TIMEOUT_DAYS) <= utc_now()
+
+
+def is_refresh_token_in_grace_period(token_row: RefreshToken) -> bool:
+    if token_row.revoked_at is None:
+        return False
+
+    if token_row.revoke_reason != "rotated":
+        return False
+
+    revoked_at = ensure_aware(token_row.revoked_at)
+    return revoked_at + timedelta(seconds=REFRESH_ROTATION_GRACE_SECONDS) >= utc_now()
 
 
 def set_refresh_token_cookie(response: Response, refresh_token: str) -> None:
@@ -143,7 +138,7 @@ def set_refresh_token_cookie(response: Response, refresh_token: str) -> None:
         httponly=True,
         secure=COOKIE_SECURE,
         samesite=COOKIE_SAMESITE,
-        max_age=REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
+        max_age=REFRESH_ABSOLUTE_LIFETIME_DAYS * 24 * 60 * 60,
         path="/",
     )
 
@@ -157,13 +152,57 @@ def clear_refresh_token_cookie(response: Response) -> None:
     )
 
 
+async def issue_tokens_and_save(
+    response: Response,
+    db: AsyncSession,
+    user: User,
+    user_agent: str | None = None,
+    ip_address: str | None = None,
+) -> None:
+    now = utc_now()
+
+    access_token = create_access_token(data={"sub": str(user.id)})
+    refresh_token = create_refresh_token()
+
+    refresh_token_row = RefreshToken(
+        user_id=user.id,
+        token_hash=hash_refresh_token(refresh_token),
+        family_id=uuid.uuid4(),
+        parent_token_id=None,
+        replaced_by_token_id=None,
+        user_agent=user_agent,
+        ip_address=ip_address,
+        expires_at=now + timedelta(days=REFRESH_ABSOLUTE_LIFETIME_DAYS),
+        last_used_at=now,
+        revoked_at=None,
+        revoke_reason=None,
+        created_at=now,
+    )
+
+    db.add(refresh_token_row)
+    user.last_login_at = now
+
+    await db.commit()
+
+    set_access_token_cookie(response, access_token)
+    set_refresh_token_cookie(response, refresh_token)
+
+
+def revoke_refresh_token(token_row: RefreshToken, reason: str) -> None:
+    token_row.revoked_at = utc_now()
+    token_row.revoke_reason = reason
+
+
 async def rotate_refresh_token(
     db: AsyncSession,
     old_token_row: RefreshToken,
     user_agent: str | None = None,
     ip_address: str | None = None,
 ) -> str:
+    now = utc_now()
+
     revoke_refresh_token(old_token_row, "rotated")
+    old_token_row.last_used_at = now
 
     new_refresh_token = create_refresh_token()
 
@@ -172,15 +211,21 @@ async def rotate_refresh_token(
         token_hash=hash_refresh_token(new_refresh_token),
         family_id=old_token_row.family_id,
         parent_token_id=old_token_row.id,
+        replaced_by_token_id=None,
         user_agent=user_agent,
         ip_address=ip_address,
-        expires_at=get_refresh_token_expiry(),
+        expires_at=old_token_row.expires_at,
+        last_used_at=now,
         revoked_at=None,
         revoke_reason=None,
-        created_at=datetime.now(timezone.utc),
+        created_at=now,
     )
 
     db.add(new_token_row)
+    await db.flush()
+
+    old_token_row.replaced_by_token_id = new_token_row.id
+
     await db.commit()
 
     return new_refresh_token
@@ -198,7 +243,7 @@ async def revoke_token_family(
             RefreshToken.revoked_at.is_(None),
         )
         .values(
-            revoked_at=datetime.now(timezone.utc),
+            revoked_at=utc_now(),
             revoke_reason=reason,
         )
     )
