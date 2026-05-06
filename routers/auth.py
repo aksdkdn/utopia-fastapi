@@ -9,9 +9,9 @@ from tasks.email_tasks import send_email_task
 from fastapi.concurrency import run_in_threadpool
 from core.celery_app import celery_app
 
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks, status, Response, Cookie, Request
-from fastapi_mail import FastMail, MessageSchema, ConnectionConfig
-from pydantic import BaseModel, EmailStr
+from fastapi import APIRouter, Depends, HTTPException, status, Response, Cookie, Request
+from fastapi_mail import ConnectionConfig
+from pydantic import EmailStr
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -28,8 +28,6 @@ from schemas.auth import (
     UserLogin,
     FindIdRequest,
     FindIdResponse,
-    FindPasswordRequest,
-    FindPasswordResponse,
     ResetPasswordRequest,
     ResetPasswordResponse,
     SocialLoginBody,
@@ -642,10 +640,15 @@ async def check_email(email: str, db: AsyncSession = Depends(get_db)):
 @router.post("/email-request")
 async def email_request(
     email: EmailStr,
-    background_tasks: BackgroundTasks,
     type: str = "signup",
     db: AsyncSession = Depends(get_db),
 ):
+    if type not in ("signup", "reset-password"):
+        raise HTTPException(
+            status_code=400,
+            detail="지원하지 않는 이메일 인증 요청 타입입니다.",
+        )
+
     if type == "signup":
         result = await db.execute(select(User).where(User.email == email))
         if result.scalar_one_or_none():
@@ -658,16 +661,23 @@ async def email_request(
         result = await db.execute(select(User).where(User.email == email))
         user = result.scalar_one_or_none()
 
-        if not user or user.provider != "local" or not user.is_active:
+        if not user or not user.is_active:
             raise HTTPException(
                 status_code=404,
                 detail="가입된 계정을 찾을 수 없습니다.",
             )
 
+        if user.password_hash is None:
+            raise HTTPException(
+                status_code=400,
+                detail="소셜 로그인으로 가입한 계정입니다. 소셜 로그인을 이용해주세요.",
+            )
+
     auth_code = str(random.randint(100000, 999999))
+    redis_key = get_email_auth_key(str(email))
 
     await redis_client.setex(
-        get_email_auth_key(str(email)),
+        redis_key,
         settings.EMAIL_AUTH_TTL_SECONDS,
         auth_code,
     )
@@ -679,31 +689,17 @@ async def email_request(
         subject = "[Party-Up] 회원가입 인증번호입니다."
         body = f"안녕하세요!\n\n회원가입 인증번호는 [{auth_code}] 입니다."
 
-    message = MessageSchema(
-        subject=subject,
-        recipients=[email],
-        body=body,
-        subtype="plain",
-    )
-
-    fm = FastMail(conf)
-
-    # 1. SMTP - Backgroundtasks로 실행
-    # background_tasks.add_task(fm.send_message, message)
-
-    # 2. SMTP - Celery로 실행
     try:
         workers = await run_in_threadpool(
             lambda: celery_app.control.ping(timeout=1.0)
         )
 
         if not workers:
-            await redis_client.delete(get_email_auth_key(str(email)))
+            await redis_client.delete(redis_key)
             raise HTTPException(
                 status_code=503,
-                detail="이메일 발송에 문제가 발생했습니다. 잠시 후 다시 시도해주세요."
+                detail="이메일 발송에 문제가 발생했습니다. 잠시 후 다시 시도해주세요.",
             )
-
 
         send_email_task.apply_async(
             kwargs={
@@ -712,9 +708,12 @@ async def email_request(
                 "body": body,
             }
         )
+
+    except HTTPException:
+        raise
+
     except (OperationalError, CeleryError):
-        # Redis에 저장된 인증코드 롤백
-        await redis_client.delete(get_email_auth_key(str(email)))
+        await redis_client.delete(redis_key)
 
         raise HTTPException(
             status_code=503,
@@ -786,16 +785,6 @@ async def get_random_nickname(db: AsyncSession = Depends(get_db)):
 
     return RandomNicknameResponse(nickname=fallback_nickname)
 
-@router.post("/users/find-password", response_model=FindPasswordResponse)
-async def find_password(
-    payload: FindPasswordRequest,
-    db: AsyncSession = Depends(get_db),
-):
-
-    return FindPasswordResponse(
-        message="입력하신 이메일로 비밀번호 재설정 안내를 진행할 수 있습니다."
-    )
-
 
 @router.post("/users/reset-password", response_model=ResetPasswordResponse)
 async def reset_password(
@@ -804,6 +793,7 @@ async def reset_password(
 ):
     verified_key = f"password_reset_verified:{payload.email}"
     verified = await redis_client.get(verified_key)
+
 
     if not verified:
         raise HTTPException(
@@ -833,6 +823,12 @@ async def reset_password(
             status_code=403,
             detail="비활성화된 계정입니다.",
         )
+    
+    if verify_password(payload.new_password, user.password_hash):
+        raise HTTPException(
+            status_code=400,
+            detail="이전 비밀번호와 동일한 비밀번호는 사용할 수 없습니다.",
+        )
 
     user.password_hash = get_password_hash(payload.new_password)
     await db.commit()
@@ -842,6 +838,7 @@ async def reset_password(
     return ResetPasswordResponse(
         message="비밀번호가 성공적으로 변경되었습니다."
     )
+
 
 
 @router.post("/login")

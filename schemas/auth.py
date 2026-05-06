@@ -143,15 +143,6 @@ class FindIdResponse(BaseModel):
     message: Optional[str] = None
 
 
-# 비밀번호 찾기
-class FindPasswordRequest(BaseModel):
-    email: EmailStr
-
-
-class FindPasswordResponse(BaseModel):
-    message: str
-
-
 class ResetPasswordRequest(BaseModel):
     email: EmailStr
     new_password: str = Field(..., min_length=8, max_length=100)
