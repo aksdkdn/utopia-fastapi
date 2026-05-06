@@ -50,6 +50,9 @@ from services.auth_service import (
     issue_tokens_and_save,
     hash_refresh_token,
     add_user_referrers_service,
+    is_refresh_absolute_expired,
+    is_refresh_inactive,
+    is_refresh_token_in_grace_period,
 )
 from services.oauth_service import (
     get_google_access_token, get_google_user_info,
@@ -150,6 +153,8 @@ async def refresh_token_api(
 ):
     refresh_token = request.cookies.get("refresh_token")
     if not refresh_token:
+        clear_access_token_cookie(response)
+        clear_refresh_token_cookie(response)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="refresh token이 없습니다.",
@@ -163,33 +168,81 @@ async def refresh_token_api(
     token_row = result.scalar_one_or_none()
 
     if not token_row:
+        clear_access_token_cookie(response)
+        clear_refresh_token_cookie(response)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="유효하지 않은 refresh token입니다.",
-        )
-
-    if token_row.revoked_at is not None:
-        await handle_refresh_token_reuse(db, token_row)
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="재사용된 refresh token이 감지되어 모든 세션이 종료되었습니다.",
-        )
-
-    # timezone-aware 비교 (DB에서 naive datetime으로 올 경우 UTC로 처리)
-    expires_at = token_row.expires_at
-    if expires_at.tzinfo is None:
-        expires_at = expires_at.replace(tzinfo=timezone.utc)
-    if expires_at <= datetime.now(timezone.utc):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="만료된 refresh token입니다.",
         )
 
     client_ip = request.client.host if request.client else None
     if client_ip:
         is_ip_banned = await redis_client.get(f"ip:banned:{client_ip}")
         if is_ip_banned:
+            clear_access_token_cookie(response)
+            clear_refresh_token_cookie(response)
             raise HTTPException(status_code=403, detail="이용이 제한된 계정입니다.")
+
+    user_result = await db.execute(select(User).where(User.id == token_row.user_id))
+    user = user_result.scalar_one_or_none()
+
+    if not user or not user.is_active:
+        clear_access_token_cookie(response)
+        clear_refresh_token_cookie(response)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="유효하지 않은 사용자입니다.",
+        )
+
+    # 이미 revoke된 토큰 처리
+    if token_row.revoked_at is not None:
+        # rotation 직후 동시 요청이면 grace period로 보고 공격 처리하지 않음
+        if is_refresh_token_in_grace_period(token_row):
+            new_access_token = create_access_token(data={"sub": str(token_row.user_id)})
+            set_access_token_cookie(response, new_access_token)
+
+            return {
+                "message": "grace period 내 refresh 요청으로 access token만 재발급되었습니다.",
+                "access_token_expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+            }
+
+        await handle_refresh_token_reuse(db, token_row)
+
+        clear_access_token_cookie(response)
+        clear_refresh_token_cookie(response)
+
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="재사용된 refresh token이 감지되어 모든 세션이 종료되었습니다.",
+        )
+
+    # absolute lifetime 체크
+    if is_refresh_absolute_expired(token_row):
+        token_row.revoked_at = datetime.now(timezone.utc)
+        token_row.revoke_reason = "absolute_expired"
+        await db.commit()
+
+        clear_access_token_cookie(response)
+        clear_refresh_token_cookie(response)
+
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="로그인 유지 기간이 만료되었습니다. 다시 로그인해주세요.",
+        )
+
+    # inactivity timeout 체크
+    if is_refresh_inactive(token_row):
+        token_row.revoked_at = datetime.now(timezone.utc)
+        token_row.revoke_reason = "inactive_expired"
+        await db.commit()
+
+        clear_access_token_cookie(response)
+        clear_refresh_token_cookie(response)
+
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="장기간 사용하지 않아 세션이 만료되었습니다. 다시 로그인해주세요.",
+        )
 
     new_access_token = create_access_token(data={"sub": str(token_row.user_id)})
 
@@ -203,7 +256,10 @@ async def refresh_token_api(
     set_access_token_cookie(response, new_access_token)
     set_refresh_token_cookie(response, new_refresh_token)
 
-    return {"message": "access token과 refresh token이 재발급되었습니다."}
+    return {
+        "message": "access token과 refresh token이 재발급되었습니다.",
+        "access_token_expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        }
 
 
 @router.get("/me")
@@ -232,6 +288,7 @@ async def me(
 
     return {
         "is_logged_in": True,
+        "access_token_expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         "user": {
             "user_id": str(user.id),
             "email": user.email,
@@ -825,6 +882,7 @@ async def login(
 
     return {
         "message": "로그인에 성공했습니다.",
+        "access_token_expires_in": settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
         "user": {
             "email": user.email,
             "nickname": user.nickname,
