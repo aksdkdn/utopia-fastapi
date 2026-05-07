@@ -283,7 +283,7 @@ app.include_router(praises.router, prefix='/api')
 app.include_router(search.router, prefix='/api')
 
 
-_sdk_dir = Path(__file__).resolve().parent.parent / "sdk"
+_sdk_dir = Path(__file__).resolve().parent / "sdk"
 if _sdk_dir.is_dir():
     app.mount("/sdk", StaticFiles(directory=str(_sdk_dir)), name="sdk")
 
