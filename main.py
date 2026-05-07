@@ -29,6 +29,7 @@ from routers.admin_moderation_config import router as admin_mod_config_router
 from routers.admin.cloud_monitor import router as admin_cloud_monitor_router
 from routers.admin import admin_quick_match
 from routers.appeal import router as appeal_router
+from routers.appeal import router as appeal_router
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -163,11 +164,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# 리버스 프록시(Nginx) 뒤에서 실제 클라이언트 IP를 읽기 위해 ProxyHeaders 미들웨어 등록
 app.add_middleware(ProxyHeadersMiddleware, trusted_hosts="*")
 
-
-# 상원: 관리자 접근 로그를 남기기 전에 쿠키 access token에서 사용자 식별자를 안전하게 읽습니다.
 def _extract_actor_user_id(request: Request) -> uuid.UUID | None:
     access_token = request.cookies.get("access_token")
     if not access_token:
@@ -181,40 +179,33 @@ def _extract_actor_user_id(request: Request) -> uuid.UUID | None:
     except (JWTError, ValueError):
         return None
 
-# [중요] CORS 미들웨어를 먼저 등록하여 모든 요청에 대해 보안 헤더를 처리합니다.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
-    # 쿠키 기반 인증과 캡챠 API가 같이 동작하므로 와일드카드 대신 명시적 오리진 목록을 사용합니다.
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 1. 예외 처리 미들웨어 (WebSocket 제외 로직 포함)
 @app.middleware("http")
 async def log_exceptions(request: Request, call_next):
-    # 웹소켓 요청은 HTTP 미들웨어 로직을 타지 않도록 즉시 통과
     if request.headers.get("upgrade") == "websocket":
         return await call_next(request)
         
     try:
         return await call_next(request)
     except HTTPException:
-        # 상원: FastAPI가 기본 처리하는 HTTP 예외는 그대로 넘겨야 CORS 헤더와 상태 코드가 유지됩니다.
         raise
     except Exception as e:
         traceback.print_exc()
         headers = {}
         origin = request.headers.get("origin")
         if origin and origin in settings.ALLOWED_ORIGINS:
-            # 상원: 예외 응답도 프론트가 읽을 수 있도록 허용된 오리진이면 CORS 헤더를 직접 붙입니다.
             headers["Access-Control-Allow-Origin"] = origin
             headers["Access-Control-Allow-Credentials"] = "true"
             headers["Vary"] = "Origin"
         return JSONResponse(status_code=500, content={"detail": str(e)}, headers=headers)
 
-# 2. 응답 시간 측정 미들웨어 (WebSocket 제외 로직 포함)
 @app.middleware("http")
 async def timing_middleware(request: Request, call_next):
     if request.headers.get("upgrade") == "websocket":
@@ -228,7 +219,7 @@ async def timing_middleware(request: Request, call_next):
     return response
 
 
-# 상원: /api/admin 하위 요청은 응답이 끝난 뒤 접근 로그를 activity_logs 테이블에 남깁니다.
+
 @app.middleware("http")
 async def admin_access_log_middleware(request: Request, call_next):
     if request.headers.get("upgrade") == "websocket":
@@ -254,7 +245,6 @@ async def admin_access_log_middleware(request: Request, call_next):
 
     return response
 
-# 라우터 등록 (prefix="/api" 유지)
 app.include_router(auth.router, prefix="/api")
 app.include_router(parties.router, prefix="/api")
 app.include_router(payments.router, prefix="/api")
@@ -262,16 +252,15 @@ app.include_router(quick_match_router, prefix="/api")
 app.include_router(notifications.router, prefix="/api")
 app.include_router(ws_notifications.router)
 app.include_router(chat.router, prefix="/api")
-# 상원: 1차 행동 캡챠는 behavior_captcha 라우터로, 2차 handOCR 캡챠는 captcha 라우터로 각각 등록합니다.
-app.include_router(behavior_captcha.router, prefix="/api")  # 상원
+app.include_router(behavior_captcha.router, prefix="/api")  
 app.include_router(captcha.router, prefix="/api")
-app.include_router(siteverify.router)  # 상원: SaaS B2 siteverify (prefix는 라우터 내부에서 설정)
+app.include_router(siteverify.router) 
 app.include_router(assets.router, prefix="/api", tags=["Assets"])
-# 상원: 관리자 페이지가 실제 데이터를 읽고 상태를 바꿀 수 있도록 관리자 라우터를 연결합니다.
-app.include_router(admin.router, prefix="/api")  # 상원
+
+app.include_router(admin.router, prefix="/api")  
 app.include_router(report.router, prefix="/api")  
 
-# 마이페이지 라우터
+
 app.include_router(profile.router, prefix="/api")
 app.include_router(mypage_parties.router, prefix="/api")
 app.include_router(trust_history.router, prefix="/api")
@@ -281,18 +270,19 @@ app.include_router(referrers.router, prefix="/api")
 app.include_router(admin_mod_config_router, prefix="/api")
 app.include_router(admin_cloud_monitor_router, prefix="/api")
 app.include_router(admin_quick_match.router, prefix="/api")
+app.include_router(appeal_router)
 
 app.include_router(appeal_router)
-# admin handocr
+
 app.include_router(admin_handocr.router, prefix="/api")
 
-# 칭찬
+
 app.include_router(praises.router, prefix='/api')
 
-# 실검
+
 app.include_router(search.router, prefix='/api')
 
-# ── SDK 정적 파일 서빙 (/sdk/partyup-captcha.js) ──
+
 _sdk_dir = Path(__file__).resolve().parent.parent / "sdk"
 if _sdk_dir.is_dir():
     app.mount("/sdk", StaticFiles(directory=str(_sdk_dir)), name="sdk")
