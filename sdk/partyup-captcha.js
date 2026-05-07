@@ -1,6 +1,6 @@
 /**
  * PartyUp CAPTCHA JS SDK v1.0.0
- * 파트너 사이트에서 <script defer src="https://api.party-up.xyz/sdk/partyup-captcha.js"></script>
+ * 파트너 사이트에서 <script defer src="https://party-up.store/sdk/partyup-captcha.js"></script>
  * 로 로드한 뒤 PartyUpCaptcha.render(element, { siteKey, onSuccess, onError }) 로 사용
  *
  * IIFE 패턴: CDN <script> 로딩 환경에서 전역 오염 없이 단일 진입점만 노출
@@ -11,7 +11,7 @@
   // ══════════════════════════════════════════════════════════════
   // 1. 설정 상수
   // ══════════════════════════════════════════════════════════════
-  var API_BASE = 'https://api.party-up.xyz';
+  var API_BASE = 'https://party-up.store';
   var MAX_MOUSE_POINTS = 500;
   var SDK_VERSION = '1.0.0';
 
@@ -1038,7 +1038,7 @@
      * @param {Function} [options.onError] - 에러 발생 시 콜백 (message)
      * @param {string} [options.triggerType='new_ip_login'] - 트리거 유형
      * @param {string} [options.lang='ko'] - 언어 (향후 확장용)
-     * @param {string} [options.apiBase] - API 서버 주소 (기본: https://api.party-up.xyz)
+     * @param {string} [options.apiBase] - API 서버 주소 (기본: https://party-up.store)
      * @returns {CaptchaInstance} 위젯 인스턴스 (getToken, reset, destroy 메서드 사용 가능)
      */
     render: function (container, options) {
