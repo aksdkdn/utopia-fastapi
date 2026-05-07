@@ -1,6 +1,9 @@
-from fastapi import APIRouter, Request
+from typing import Optional
+
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import Response
 
+from core.site_key_auth import verify_site_key
 from schemas.captcha import (
     CaptchaChallengeResponse,
     CaptchaEnvInfo,
@@ -11,6 +14,7 @@ from schemas.captcha import (
     CaptchaVerifyRequest,
     CaptchaVerifyResponse,
 )
+from schemas.siteverify import SiteKeyContext
 from services.captcha_service import (
     get_captcha_status,
     get_challenge,
@@ -30,9 +34,14 @@ router = APIRouter(prefix="/captcha", tags=["BehaviorCaptcha"])
 
 
 @router.post("/init", response_model=CaptchaInitResponse)  # 상원
-async def captcha_init(payload: CaptchaInitRequest, request: Request):
+async def captcha_init(
+    payload: CaptchaInitRequest,
+    request: Request,
+    site_ctx: Optional[SiteKeyContext] = Depends(verify_site_key),
+):
     # 상원: 행동 데이터 기반 1차 판정을 시작하는 진입점입니다.
     # 상원: 실제 점수 계산과 세션 생성은 서비스 계층 함수 initiate_captcha에 위임합니다.
+    # SaaS: X-Site-Key 헤더가 있으면 verify_site_key가 DB 검증 (무효 키 → 403)
     return await initiate_captcha(payload, request)
 
 
@@ -41,6 +50,7 @@ async def captcha_challenge(
     session_id: str,
     request: Request,
     force_refresh: bool = False,
+    site_ctx: Optional[SiteKeyContext] = Depends(verify_site_key),
 ):
     # 상원: challenge 상태 세션의 3x3 이미지 문제를 내려줍니다.
     # 상원: 세션 검증과 문제 생성은 서비스 계층 함수 get_challenge가 처리합니다.
@@ -48,7 +58,11 @@ async def captcha_challenge(
 
 
 @router.post("/verify", response_model=CaptchaVerifyResponse)  # 상원
-async def captcha_verify(payload: CaptchaVerifyRequest, request: Request):
+async def captcha_verify(
+    payload: CaptchaVerifyRequest,
+    request: Request,
+    site_ctx: Optional[SiteKeyContext] = Depends(verify_site_key),
+):
     # 상원: 사용자가 선택한 3칸이 이모지 순서와 맞는지 검증하고 통과 토큰을 발급합니다.
     # 상원: 실제 정답 판정과 토큰 발급은 서비스 계층 함수 verify_challenge가 처리합니다.
     return await verify_challenge(payload, request)
