@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from models.refresh_token import RefreshToken
 from models.user import User, UserReferrer
 from core.config import settings
+from services.notification_ws_service import notification_connection_manager
 
 
 SECRET_KEY = settings.SECRET_KEY
@@ -160,6 +161,32 @@ async def issue_tokens_and_save(
     ip_address: str | None = None,
 ) -> None:
     now = utc_now()
+
+    # 기존 활성 세션 전체 revoke + force_logout 발송
+    existing_tokens = (
+        await db.execute(
+            select(RefreshToken).where(
+                RefreshToken.user_id == user.id,
+                RefreshToken.revoked_at.is_(None),
+                RefreshToken.expires_at > now,
+            )
+        )
+    ).scalars().all()
+
+    if existing_tokens:
+        for token_row in existing_tokens:
+            token_row.revoked_at = now
+            token_row.revoke_reason = "new_login"
+
+        await notification_connection_manager.send_to_user(
+            user.id,
+            {
+                "type": "force_logout",
+                "ban_type": None,
+                "content": "다른 기기에서 로그인되어 현재 세션이 종료되었습니다.",
+                "created_at": now.isoformat(),
+            },
+        )
 
     access_token = create_access_token(data={"sub": str(user.id)})
     refresh_token = create_refresh_token()
