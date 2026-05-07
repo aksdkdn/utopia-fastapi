@@ -64,6 +64,7 @@ from schemas.admin import (
     SystemLogRecordOut,
     UserStatusLogOut,
 )
+from schemas.user import MessageOut
 from services.notifications.report_notification_service import (
     notify_report_result_to_reporter,
     notify_report_warning_to_target,
@@ -225,3 +226,50 @@ async def update_admin_role(
     await db.refresh(role_row)
 
     return _serialize_admin_role(role_row, target_user, admin.user)
+
+
+@router.delete("/roles/{user_id}", response_model=MessageOut)
+async def delete_admin_role(
+    user_id: str,
+    admin: AdminContext = Depends(require_admin_role_permission),
+    db: AsyncSession = Depends(get_db),
+):
+    target_user = await _resolve_user_from_identifier(db, user_id)
+    role_row = await db.scalar(select(AdminRole).where(AdminRole.user_id == target_user.id))
+
+    if role_row is None:
+        raise HTTPException(status_code=404, detail="해당 사용자는 관리자 권한이 없습니다.")
+
+    if target_user.id == admin.user.id:
+        raise HTTPException(
+            status_code=400,
+            detail="본인 관리자 권한은 직접 삭제할 수 없습니다.",
+        )
+
+    if role_row.can_manage_admins and await _count_root_admins(db) <= 1:
+        raise HTTPException(
+            status_code=400,
+            detail="마지막 ROOT 관리자는 삭제할 수 없습니다.",
+        )
+
+    await db.delete(role_row)
+    target_user.role = "user"
+
+    await _append_activity_log(
+        db,
+        actor_user_id=admin.user.id,
+        action_type="admin_role_deleted",
+        description=f"{target_user.nickname} 관리자 권한을 해제",
+        path=f"/api/admin/roles/{user_id}",
+    )
+    await _append_system_log(
+        db,
+        level="INFO",
+        service="admin",
+        message=f"관리자 권한 삭제: {target_user.nickname}",
+        actor=admin.user.nickname,
+        admin_id=admin.user.id,
+    )
+    await db.commit()
+
+    return MessageOut(message="관리자 권한을 해제했습니다.")
