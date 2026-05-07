@@ -220,6 +220,102 @@ async def timing_middleware(request: Request, call_next):
 
 
 
+_ADMIN_PATH_LABELS: list[tuple[str, str, str]] = [
+    ("GET",    "/api/admin/dashboard",                          "대시보드 조회"),
+    ("GET",    "/api/admin/users",                              "사용자 목록 조회"),
+    ("GET",    "/api/admin/users/",                             "사용자 상세 조회"),
+    ("PATCH",  "/api/admin/users/",                             "사용자 정보 수정"),
+    ("PATCH",  "/api/admin/users/{id}/status",                  "사용자 상태 변경"),
+    ("PATCH",  "/api/admin/users/{id}/trust-score",             "신뢰도 점수 수정"),
+    ("PATCH",  "/api/admin/users/{id}/recommender",             "추천인 수정"),
+    ("GET",    "/api/admin/users/{id}/status-logs",             "사용자 상태 변경 이력 조회"),
+    ("GET",    "/api/admin/users/{id}/access-logs",             "사용자 접근 로그 조회"),
+    ("GET",    "/api/admin/services",                           "구독 서비스 목록 조회"),
+    ("PATCH",  "/api/admin/services/",                          "구독 서비스 정보 수정"),
+    ("GET",    "/api/admin/parties",                            "파티 목록 조회"),
+    ("POST",   "/api/admin/parties/",                           "파티 강제 종료"),
+    ("GET",    "/api/admin/parties/{id}/members",               "파티 멤버 목록 조회"),
+    ("POST",   "/api/admin/parties/{id}/members/{uid}/kick",    "파티 멤버 강제 퇴장"),
+    ("PATCH",  "/api/admin/parties/{id}/members/{uid}/role",    "파티 멤버 역할 변경"),
+    ("GET",    "/api/admin/quick-match/requests",               "빠른매칭 요청 목록 조회"),
+    ("GET",    "/api/admin/quick-match/requests/",              "빠른매칭 요청 상세 조회"),
+    ("GET",    "/api/admin/quick-match/policy",                 "빠른매칭 정책 조회"),
+    ("PATCH",  "/api/admin/quick-match/policy",                 "빠른매칭 정책 수정"),
+    ("POST",   "/api/admin/quick-match/",                       "빠른매칭 관리 작업 수행"),
+    ("GET",    "/api/admin/reports",                            "신고 목록 조회"),
+    ("PATCH",  "/api/admin/reports/",                           "신고 처리"),
+    ("GET",    "/api/admin/reports/evidences/",                 "신고 증거 파일 조회"),
+    ("GET",    "/api/admin/moderation/chat-logs",               "채팅 모더레이션 로그 조회"),
+    ("GET",    "/api/admin/moderation/chat-stats",              "채팅 모더레이션 통계 조회"),
+    ("GET",    "/api/admin/moderation/chat-trend",              "채팅 모더레이션 추세 조회"),
+    ("PATCH",  "/api/admin/moderation/chat-logs/",              "채팅 모더레이션 상태 변경"),
+    ("GET",    "/api/admin/moderation/config",                  "모더레이션 설정 조회"),
+    ("PATCH",  "/api/admin/moderation/config",                  "모더레이션 설정 수정"),
+    ("POST",   "/api/admin/moderation/config/reset",            "모더레이션 설정 초기화"),
+    ("POST",   "/api/admin/moderation/whitelist",               "모더레이션 허용 단어 추가"),
+    ("DELETE", "/api/admin/moderation/whitelist/",              "모더레이션 허용 단어 삭제"),
+    ("POST",   "/api/admin/moderation/blacklist",               "모더레이션 금지 단어 추가"),
+    ("DELETE", "/api/admin/moderation/blacklist/",              "모더레이션 금지 단어 삭제"),
+    ("GET",    "/api/admin/moderation/finetune/stats",          "모더레이션 파인튜닝 통계 조회"),
+    ("POST",   "/api/admin/moderation/unblock/user/",           "채팅 차단 사용자 해제"),
+    ("GET",    "/api/admin/moderation/chat-bans",               "채팅 차단 목록 조회"),
+    ("GET",    "/api/admin/users/{id}/status-logs",             "사용자 상태 로그 조회"),
+    ("GET",    "/api/admin/captcha/shadow",                     "캡챠 섀도우 설정 조회"),
+    ("PUT",    "/api/admin/captcha/shadow",                     "캡챠 섀도우 설정 변경"),
+    ("GET",    "/api/admin/captcha/blocked-ips",                "캡챠 차단 IP 목록 조회"),
+    ("DELETE", "/api/admin/captcha/blocked-ips/",               "캡챠 차단 IP 삭제"),
+    ("DELETE", "/api/admin/captcha/blocked-ips",                "캡챠 차단 IP 전체 삭제"),
+    ("GET",    "/api/admin/captcha/config",                     "캡챠 설정 조회"),
+    ("PUT",    "/api/admin/captcha/config",                     "캡챠 설정 변경"),
+    ("POST",   "/api/admin/captcha/force-challenge",            "캡챠 강제 발동"),
+    ("GET",    "/api/admin/captcha/stats",                      "캡챠 통계 조회"),
+    ("GET",    "/api/admin/captcha/sessions",                   "캡챠 세션 목록 조회"),
+    ("GET",    "/api/admin/captcha/sessions/",                  "캡챠 세션 이미지 조회"),
+    ("GET",    "/api/admin/captcha/images",                     "캡챠 이미지 목록 조회"),
+    ("GET",    "/api/admin/captcha/images/",                    "캡챠 이미지 세트 조회"),
+    ("PUT",    "/api/admin/captcha/sets/",                      "캡챠 세트 비활성화"),
+    ("PUT",    "/api/admin/captcha/images/batch-deactivate",    "캡챠 이미지 일괄 비활성화"),
+    ("PUT",    "/api/admin/captcha/images/",                    "캡챠 이미지 비활성화"),
+    ("POST",   "/api/admin/captcha/generate",                   "캡챠 이미지 생성"),
+    ("GET",    "/api/admin/captcha/generate/status",            "캡챠 이미지 생성 상태 조회"),
+    ("GET",    "/api/admin/handocr/records",                    "HandOCR 인증 기록 조회"),
+    ("GET",    "/api/admin/handocr/health",                     "HandOCR 서비스 상태 조회"),
+    ("GET",    "/api/admin/handocr/image",                      "HandOCR 이미지 조회"),
+    ("GET",    "/api/admin/handocr/blocks",                     "HandOCR 차단 목록 조회"),
+    ("POST",   "/api/admin/handocr/blocks/",                    "HandOCR 차단 IP 해제"),
+    ("POST",   "/api/admin/handocr/ips/",                       "HandOCR IP 실패 횟수 초기화"),
+    ("GET",    "/api/admin/handocr/sessions",                   "HandOCR 세션 목록 조회"),
+    ("POST",   "/api/admin/handocr/sessions/",                  "HandOCR 세션 만료 처리"),
+    ("GET",    "/api/admin/settlements",                        "정산 목록 조회"),
+    ("PATCH",  "/api/admin/settlements/",                       "정산 승인/거절 처리"),
+    ("GET",    "/api/admin/payments",                           "수익 내역 조회"),
+    ("GET",    "/api/admin/receipts",                           "영수증 목록 조회"),
+    ("PATCH",  "/api/admin/receipts/",                          "영수증 상태 변경"),
+    ("GET",    "/api/admin/appeals",                            "이의제기 목록 조회"),
+    ("PATCH",  "/api/admin/appeals/",                           "이의제기 처리"),
+    ("GET",    "/api/admin/me",                                 "내 관리자 권한 조회"),
+    ("GET",    "/api/admin/roles",                              "관리자 권한 목록 조회"),
+    ("PUT",    "/api/admin/roles/",                             "관리자 권한 수정"),
+    ("DELETE", "/api/admin/roles/",                             "관리자 권한 삭제"),
+    ("GET",    "/api/admin/cloud-monitor/summary",              "클라우드 모니터링 요약 조회"),
+    ("GET",    "/api/admin/cloud-monitor/range",                "클라우드 모니터링 범위 조회"),
+    ("GET",    "/api/admin/cloud-monitor/lb",                   "로드밸런서 상태 조회"),
+    ("GET",    "/api/admin/cloud-monitor/debug/labels",         "클라우드 모니터링 디버그 레이블 조회"),
+    ("GET",    "/api/admin/cloud-monitor/debug/raw",            "클라우드 모니터링 디버그 원본 조회"),
+    ("GET",    "/api/admin/cloud-monitor/debug/disk-unit",      "클라우드 모니터링 디스크 단위 조회"),
+]
+
+
+def _admin_path_label(method: str, path: str) -> str:
+    for m, p, label in _ADMIN_PATH_LABELS:
+        if m == method and not p.endswith("/") and p == path:
+            return label
+    for m, p, label in _ADMIN_PATH_LABELS:
+        if m == method and p.endswith("/") and path.startswith(p):
+            return label
+    return f"관리자 API 접근 ({method} {path})"
+
+
 @app.middleware("http")
 async def admin_access_log_middleware(request: Request, call_next):
     if request.headers.get("upgrade") == "websocket":
@@ -233,10 +329,10 @@ async def admin_access_log_middleware(request: Request, call_next):
                 session.add(
                     ActivityLog(
                         actor_user_id=_extract_actor_user_id(request),
-                        action_type="admin_access",
-                        description=f"{request.method} {request.url.path} -> {response.status_code}",
+                        action_type="관리자 접근",
+                        description=_admin_path_label(request.method, request.url.path),
                         ip_address=request.client.host if request.client else None,
-                        extra_metadata={"path": request.url.path},
+                        extra_metadata={"path": request.url.path, "method": request.method, "status": response.status_code},
                     )
                 )
                 await session.commit()
