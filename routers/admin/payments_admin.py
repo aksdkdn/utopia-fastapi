@@ -106,6 +106,8 @@ from .deps import (
 router = APIRouter(prefix="/admin", tags=["admin"])
 
 
+
+
 def _extract_discount_rate(discount_reason: str | None, service: Service | None) -> float:
     if not discount_reason:
         return 0.0
@@ -218,8 +220,8 @@ async def get_admin_payments(
         expected_amount = round(base_price * (1 - discount_rate))
         amount = expected_amount if discount_rate > 0 else int(payment.amount)
 
-        commission_rate = float(payment.commission_rate) if payment.commission_rate is not None else DISPLAY_COMMISSION_RATE
-        commission_amount = int(payment.commission_amount) if payment.commission_amount is not None else round(amount * commission_rate)
+        commission_rate = float(payment.commission_rate or 0)
+        commission_amount = int(payment.commission_amount or 0)
 
         quick_match_fee_rate = 0.0
         if payment.pricing_type == "quick_match":
