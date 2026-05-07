@@ -64,8 +64,6 @@ def _to_appeal_out(a: BanAppeal) -> AppealOut:
         created_at=_fmt(a.created_at),
     )
 
-
-# ── 유저: 이의제기 신청 ──────────────────────────────────────────────────────
 @router.post("/api/appeals", response_model=AppealOut)
 async def create_appeal(
     payload: AppealCreateIn,
@@ -73,21 +71,24 @@ async def create_appeal(
     current_user: Optional[User] = Depends(get_current_user),
 ):
     if not current_user:
-        raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
+        if payload.user_id:
+            try:
+                fallback_id = uuid.UUID(payload.user_id)
+                current_user = await db.get(User, fallback_id)
+            except ValueError:
+                pass
+        if not current_user:
+            raise HTTPException(status_code=401, detail="로그인이 필요합니다.")
 
     ref_id = uuid.UUID(payload.ban_reference_id) if payload.ban_reference_id else None
 
-    # 중복 차단
     if ref_id is not None:
-        # reference_id 있으면 동일 제재 건 기준
         dup_filter = (
             BanAppeal.user_id == current_user.id,
             BanAppeal.ban_reference_id == ref_id,
             BanAppeal.status.in_(["PENDING", "APPROVED"]),
         )
     else:
-        # ip_ban / manual 등 reference_id 없는 경우 → ban_type 기준
-        # (NULL = NULL은 DB에서 false라 코드 레벨에서 체크)
         dup_filter = (
             BanAppeal.user_id == current_user.id,
             BanAppeal.ban_type == payload.ban_type,
@@ -111,7 +112,6 @@ async def create_appeal(
     )
     db.add(appeal)
 
-    # appeal 먼저 commit 후 알림 발송 (트랜잭션 순서 보장)
     await db.commit()
     await db.refresh(appeal)
 
@@ -120,8 +120,6 @@ async def create_appeal(
 
     return _to_appeal_out(appeal)
 
-
-# ── 유저: 내 이의제기 목록 ────────────────────────────────────────────────────
 @router.get("/api/appeals/my", response_model=list[AppealOut])
 async def get_my_appeals(
     db: AsyncSession = Depends(get_db),
@@ -140,8 +138,6 @@ async def get_my_appeals(
 
     return [_to_appeal_out(r) for r in rows]
 
-
-# ── 관리자: 이의제기 목록 ────────────────────────────────────────────────────
 @router.get("/api/admin/appeals", response_model=list[AdminAppealOut])
 async def get_admin_appeals(
     status_filter: str = Query(default="", alias="status"),
@@ -157,7 +153,6 @@ async def get_admin_appeals(
     if not appeals:
         return []
 
-    # 관련 유저 일괄 로드
     user_ids = {a.user_id for a in appeals}
     reviewer_ids = {a.reviewed_by for a in appeals if a.reviewed_by}
     all_ids = user_ids | reviewer_ids
@@ -168,7 +163,6 @@ async def get_admin_appeals(
             for u in (await db.execute(select(User).where(User.id.in_(all_ids)))).scalars().all()
         }
 
-    # 관련 제재 기록 일괄 로드
     ref_ids = {a.ban_reference_id for a in appeals if a.ban_reference_id}
     moderation_map: dict = {}
     trust_map: dict = {}
@@ -226,8 +220,6 @@ async def get_admin_appeals(
 
     return result
 
-
-# ── 관리자: 이의제기 처리 (승인/거부) ────────────────────────────────────────
 @router.patch("/api/admin/appeals/{appeal_id}", response_model=AdminAppealOut)
 async def review_appeal(
     appeal_id: str,
@@ -258,11 +250,9 @@ async def review_appeal(
     target_user = await db.get(User, appeal.user_id)
 
     if status_upper == "APPROVED" and target_user:
-        # 1. 계정 정지 해제
         target_user.is_active = True
         target_user.banned_until = None
 
-        # 2. IP 밴 해제 (Redis)
         if appeal.ban_type == BAN_TYPE_IP:
             from core.redis_client import redis_client
             token_row = await db.scalar(
@@ -274,7 +264,6 @@ async def review_appeal(
             if token_row and token_row.ip_address:
                 await redis_client.delete(f"ip:banned:{token_row.ip_address}")
 
-        # 3. trust_score 복구 (잃은 만큼)
         if appeal.ban_reference_id:
             trust_row = await db.get(TrustScore, appeal.ban_reference_id)
             if trust_row and float(trust_row.change_amount) < 0:
@@ -311,13 +300,11 @@ async def review_appeal(
             target_id=target_user.id if target_user else None,
         )
 
-    # appeal 먼저 commit 후 알림 발송 (트랜잭션 순서 보장)
     await db.commit()
     await db.refresh(appeal)
 
     await notify_appeal_result(db=db, appeal=appeal)
 
-    # 해당 건만 직접 조회해서 반환 (전체 재조회 성능 문제 해결)
     return await _get_single_admin_appeal(aid, db)
 
 

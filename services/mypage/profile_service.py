@@ -73,10 +73,11 @@ def _build_profile_image_url(profile_image_key: Optional[str]) -> Optional[str]:
     )
 
     if settings.MINIO_PUBLIC_ENDPOINT:
-        url = url.replace(
-            settings.MINIO_ENDPOINT,
-            settings.MINIO_PUBLIC_ENDPOINT,
-        )
+        for scheme in ("https", "http"):
+            url = url.replace(
+                f"{scheme}://{settings.MINIO_ENDPOINT}",
+                f"https://{settings.MINIO_PUBLIC_ENDPOINT}",
+            )
 
     return url
 
