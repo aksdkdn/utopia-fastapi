@@ -28,7 +28,7 @@ router = APIRouter(prefix="/admin/saas", tags=["admin-saas"])
 class ApiKeyCreateRequest(BaseModel):
     client_name: str = Field(..., min_length=1, max_length=200)
     allowed_domains: Optional[list[str]] = None
-    monthly_limit: int = Field(default=10000, ge=100)
+    monthly_limit: int = Field(default=1000, ge=100)
     plan: str = Field(default="free")
 
 
@@ -287,6 +287,12 @@ async def update_api_key(
     if payload.plan is not None:
         set_parts.append("plan = :plan")
         params["plan"] = payload.plan
+        # 플랜 변경 시 monthly_limit 자동 연동 (명시적으로 monthly_limit를 함께 보내지 않은 경우)
+        if payload.monthly_limit is None:
+            plan_limits = {"free": 1000, "starter": 5000, "pro": 30000, "enterprise": 1000000}
+            if payload.plan in plan_limits:
+                set_parts.append("monthly_limit = :monthly_limit")
+                params["monthly_limit"] = plan_limits[payload.plan]
     if payload.is_active is not None:
         set_parts.append("is_active = :is_active")
         params["is_active"] = payload.is_active
@@ -497,4 +503,139 @@ async def get_saas_stats(
         active_keys=counts["active"],
         total_usage_this_month=total_usage,
         top_clients=top_clients,
+    )
+
+
+# ══════════════════════════════════════════════════════════════
+# 플랜 문의 관리
+# ══════════════════════════════════════════════════════════════
+
+class PlanInquiryAdminOut(BaseModel):
+    id: str
+    user_id: str
+    user_email: Optional[str] = None
+    desired_plan: str
+    message: Optional[str] = None
+    status: str
+    created_at: Optional[str] = None
+
+
+class PlanInquiryListOut(BaseModel):
+    total: int
+    items: list[PlanInquiryAdminOut]
+
+
+class PlanInquiryStatusUpdate(BaseModel):
+    status: str = Field(..., description="변경할 상태: completed")
+
+
+def _fmt_dt(value) -> Optional[str]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
+    return str(value)
+
+
+@router.get(
+    "/plan-inquiries",
+    response_model=PlanInquiryListOut,
+    summary="플랜 문의 목록 (관리자)",
+)
+async def list_plan_inquiries(
+    status_filter: Optional[str] = Query(None, alias="status"),
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    _admin: AdminContext = Depends(require_admin_context),
+):
+    """관리자가 전체 플랜 문의 목록을 조회한다."""
+    where = ""
+    params: dict = {}
+    if status_filter:
+        where = "WHERE pi.status = :status"
+        params["status"] = status_filter
+
+    count_result = await db.execute(
+        text(f"SELECT COUNT(*) FROM plan_inquiries pi {where}"),
+        params,
+    )
+    total = count_result.scalar() or 0
+
+    params["limit"] = size
+    params["offset"] = (page - 1) * size
+    result = await db.execute(
+        text(f"""
+            SELECT pi.id, pi.user_id, u.email AS user_email,
+                   pi.desired_plan, pi.message, pi.status, pi.created_at
+            FROM plan_inquiries pi
+            LEFT JOIN users u ON u.id = pi.user_id
+            {where}
+            ORDER BY pi.created_at DESC
+            LIMIT :limit OFFSET :offset
+        """),
+        params,
+    )
+    rows = result.mappings().all()
+
+    return PlanInquiryListOut(
+        total=total,
+        items=[
+            PlanInquiryAdminOut(
+                id=str(r["id"]),
+                user_id=str(r["user_id"]),
+                user_email=r["user_email"],
+                desired_plan=r["desired_plan"],
+                message=r["message"],
+                status=r["status"],
+                created_at=_fmt_dt(r["created_at"]),
+            )
+            for r in rows
+        ],
+    )
+
+
+@router.put(
+    "/plan-inquiries/{inquiry_id}",
+    response_model=PlanInquiryAdminOut,
+    summary="플랜 문의 상태 변경 (관리자)",
+)
+async def update_plan_inquiry_status(
+    inquiry_id: str,
+    payload: PlanInquiryStatusUpdate,
+    db: AsyncSession = Depends(get_db),
+    _admin: AdminContext = Depends(require_admin_context),
+):
+    """관리자가 문의 상태를 변경한다 (pending → completed)."""
+    if payload.status not in ("pending", "completed"):
+        raise HTTPException(status_code=400, detail="유효한 상태: pending, completed")
+
+    result = await db.execute(
+        text("""
+            UPDATE plan_inquiries SET status = :status
+            WHERE id = :id
+            RETURNING id, user_id, desired_plan, message, status, created_at
+        """),
+        {"id": inquiry_id, "status": payload.status},
+    )
+    await db.commit()
+    row = result.mappings().first()
+    if not row:
+        raise HTTPException(status_code=404, detail="문의를 찾을 수 없습니다.")
+
+    # 이메일 조회
+    user_result = await db.execute(
+        text("SELECT email FROM users WHERE id = :uid"),
+        {"uid": str(row["user_id"])},
+    )
+    user_row = user_result.mappings().first()
+
+    return PlanInquiryAdminOut(
+        id=str(row["id"]),
+        user_id=str(row["user_id"]),
+        user_email=user_row["email"] if user_row else None,
+        desired_plan=row["desired_plan"],
+        message=row["message"],
+        status=row["status"],
+        created_at=_fmt_dt(row["created_at"]),
     )
