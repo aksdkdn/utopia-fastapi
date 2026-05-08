@@ -25,7 +25,7 @@ from services.notification_ws_service import notification_connection_manager
 router = APIRouter(prefix="/praises", tags=["praises"])
 
 PRAISE_COOLDOWN_DAYS = 30
-PRAISE_TRUST_DELTA = 0.5
+PRAISE_TRUST_DELTA = 0.1
 DEFAULT_TRUST_SCORE = 36.5
 MAX_TRUST_SCORE = 100.0
 
