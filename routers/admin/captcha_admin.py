@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -1230,8 +1231,13 @@ async def generate_captcha_images(
         try:
             await redis_client.set("captcha:generate:progress", "generating")
 
+            # generate_and_register.py는 fastapi/ 상위 디렉토리(프로젝트 루트)에 위치
+            # __file__ = fastapi/routers/admin/captcha_admin.py → parents[3] = 프로젝트 루트
+            project_root = str(Path(__file__).resolve().parents[3])
+            script_path = str(Path(project_root) / "generate_and_register.py")
+
             cmd = [
-                "python", "/home/ubuntu/ganpipeline/generate_and_register.py",
+                "python", script_path,
                 "--categories", cats,
                 "--num_per_category", str(num_per_category),
                 "--num_sets", str(num_sets),
@@ -1241,7 +1247,7 @@ async def generate_captcha_images(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                cwd="/home/ubuntu/ganpipeline",
+                cwd=project_root,
             )
             stdout, _ = await process.communicate()
             output = stdout.decode("utf-8", errors="replace") if stdout else ""
@@ -1284,4 +1290,123 @@ async def get_generate_status(
     return {
         "progress": progress or "idle",
         "last_result": last_result,
+    }
+
+
+# ── MinIO → DB 이미지 동기화 ──────────────────────────────
+
+@router.post("/captcha/sync-images", tags=["admin-captcha"])
+async def sync_minio_images_to_db(
+    current_user: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """MinIO 버킷의 기존 이미지를 emoji_images / real_photos DB에 등록 (이미 있으면 스킵)"""
+    import uuid
+    from minio import Minio
+    from minio.error import S3Error
+
+    ANIMAL_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
+    SUPPORTED_CATEGORIES = {
+        "bear", "cat", "dog", "elephant", "fox",
+        "rabbit", "lion", "penguin", "tiger", "wolf",
+    }
+
+    minio_client = Minio(
+        settings.MINIO_ENDPOINT,
+        access_key=settings.MINIO_ACCESS_KEY,
+        secret_key=settings.MINIO_SECRET_KEY,
+        secure=settings.MINIO_SECURE,
+    )
+
+    emoji_new = 0
+    emoji_skip = 0
+    photo_new = 0
+    photo_skip = 0
+
+    # ── 1) captcha-emojis → emoji_images ──
+    try:
+        objects = minio_client.list_objects(settings.MINIO_EMOJI_BUCKET, recursive=True)
+        for obj in objects:
+            name = obj.object_name
+            parts = name.split("/")
+            if len(parts) < 2:
+                continue
+
+            category = parts[0].lower()
+            if category not in SUPPORTED_CATEGORIES:
+                continue
+
+            ext = "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
+            if ext not in ANIMAL_IMAGE_EXTENSIONS:
+                continue
+
+            # 이미 DB에 있는지 확인
+            exists = await db.execute(
+                text("SELECT 1 FROM emoji_images WHERE image_key = :key"),
+                {"key": name},
+            )
+            if exists.scalar():
+                emoji_skip += 1
+                continue
+
+            await db.execute(
+                text("""
+                    INSERT INTO emoji_images (id, category, image_key, is_active, created_by)
+                    VALUES (:id, :cat, :key, true, 'admin(sync)')
+                """),
+                {"id": str(uuid.uuid4()), "cat": category, "key": name},
+            )
+            emoji_new += 1
+    except S3Error as e:
+        raise HTTPException(status_code=500, detail=f"이모지 버킷 조회 실패: {e}")
+
+    # ── 2) captcha-photos → real_photos ──
+    try:
+        objects = minio_client.list_objects(settings.MINIO_PHOTO_BUCKET, recursive=True)
+        for obj in objects:
+            name = obj.object_name
+            parts = name.split("/")
+            if len(parts) < 2:
+                continue
+
+            # captcha-photos: real_animal_photos/bear/photo.jpg
+            if parts[0] == "real_animal_photos" and len(parts) >= 3:
+                category = parts[1].lower()
+            else:
+                category = parts[0].lower()
+
+            if category not in SUPPORTED_CATEGORIES:
+                continue
+
+            ext = "." + name.rsplit(".", 1)[-1].lower() if "." in name else ""
+            if ext not in ANIMAL_IMAGE_EXTENSIONS:
+                continue
+
+            exists = await db.execute(
+                text("SELECT 1 FROM real_photos WHERE image_key = :key"),
+                {"key": name},
+            )
+            if exists.scalar():
+                photo_skip += 1
+                continue
+
+            await db.execute(
+                text("""
+                    INSERT INTO real_photos (id, category, image_key, is_active)
+                    VALUES (:id, :cat, :key, true)
+                """),
+                {"id": str(uuid.uuid4()), "cat": category, "key": name},
+            )
+            photo_new += 1
+    except S3Error as e:
+        raise HTTPException(status_code=500, detail=f"실사 버킷 조회 실패: {e}")
+
+    await db.commit()
+
+    return {
+        "message": f"동기화 완료: 이모지 {emoji_new}건 등록 ({emoji_skip}건 스킵), 실사 {photo_new}건 등록 ({photo_skip}건 스킵)",
+        "emoji_new": emoji_new,
+        "emoji_skip": emoji_skip,
+        "photo_new": photo_new,
+        "photo_skip": photo_skip,
     }
