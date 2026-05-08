@@ -476,6 +476,14 @@ async def apply_to_party(
 
     min_trust = float(party.min_trust_score or 0)
     user_trust = float(current_user.trust_score or 36.5)
+
+    # 기획서 3.2: 신뢰도 10점 미만 → 신규 파티 참여 제한
+    if user_trust < 10:
+        raise HTTPException(
+            status_code=403,
+            detail=f"신뢰도 점수가 10점 미만이면 신규 파티에 참여할 수 없습니다. (현재: {user_trust}점)",
+        )
+
     if min_trust > 0 and user_trust < min_trust:
         raise HTTPException(
             status_code=403,

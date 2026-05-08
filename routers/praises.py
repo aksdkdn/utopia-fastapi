@@ -25,7 +25,8 @@ from services.notification_ws_service import notification_connection_manager
 router = APIRouter(prefix="/praises", tags=["praises"])
 
 PRAISE_COOLDOWN_DAYS = 30
-PRAISE_TRUST_DELTA = 0.1
+PRAISE_TRUST_DELTA = 0.1        
+PRAISE_MONTHLY_CAP = 2.0        
 DEFAULT_TRUST_SCORE = 36.5
 MAX_TRUST_SCORE = 100.0
 
@@ -250,14 +251,31 @@ async def _apply_trust_reward_for_praise(
     from_user_id: uuid.UUID,
     praise_id: uuid.UUID,
 ) -> None:
+    # 이번 달 칭찬으로 이미 받은 신뢰도 합계 계산
+    now = _now_naive_utc()
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    monthly_result = await db.execute(
+        select(func.coalesce(func.sum(TrustScore.change_amount), 0))
+        .where(
+            TrustScore.user_id == to_user.id,
+            TrustScore.reason == "칭찬을 받아 신뢰도가 상승했습니다.",
+            TrustScore.created_at >= month_start,
+        )
+    )
+    monthly_gained = float(monthly_result.scalar_one() or 0)
+
+    if monthly_gained >= PRAISE_MONTHLY_CAP:
+        return  # 월 상한 도달, 지급하지 않음
+
+    # 상한 초과하지 않도록 delta 조정
+    remaining_cap = round(PRAISE_MONTHLY_CAP - monthly_gained, 1)
+    delta = min(PRAISE_TRUST_DELTA, remaining_cap)
+
     previous_score = _normalize_score(to_user.trust_score)
-
-    new_score = round(previous_score + PRAISE_TRUST_DELTA, 1)
+    new_score = round(previous_score + delta, 1)
     new_score = min(MAX_TRUST_SCORE, new_score)
-
     change_amount = round(new_score - previous_score, 1)
 
-    # 이미 100점이면 이력에 0.0 상승을 남기지 않음
     if change_amount <= 0:
         return
 

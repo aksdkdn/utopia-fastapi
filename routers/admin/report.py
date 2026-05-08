@@ -65,6 +65,7 @@ AUTO_REPORT_PENALTY = {
     "PROFANITY": -1.0,
     "SPAM": -5.0,
     "SCAM": -5.0,
+    "NO_SHOW": -5.0,   # 기획서 3.1: 노쇼 -5점
 }
 
 

@@ -36,7 +36,7 @@ from services.report_target_service import resolve_target_snapshot_name
 router = APIRouter(prefix="/reports", tags=["reports"])
 
 ALLOWED_TARGET_TYPE = "USER"
-ALLOWED_CATEGORIES = {"PROFANITY", "SCAM", "SPAM"}
+ALLOWED_CATEGORIES = {"PROFANITY", "SCAM", "SPAM", "NO_SHOW"}
 ALLOWED_STATUSES = {"PENDING", "IN_REVIEW", "APPROVED", "REJECTED"}
 
 MAX_REPORT_FILE_COUNT = 5
