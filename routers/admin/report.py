@@ -7,7 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import Response
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -178,7 +178,7 @@ async def _apply_report_penalty(
         created_by=reviewer_id,
     )
     db.add(trust_row)
-    await db.flush()  
+    await db.flush()
 
     report.admin_memo = (
         f"자동 신뢰도 차감 {abs(penalty):.1f}점 적용 / 현재 {new_score:.1f}점"
@@ -252,6 +252,22 @@ async def list_admin_reports(
     return [build_admin_report_response(report) for report in reports]
 
 
+@router.get("/unhandled-count")
+async def get_admin_report_unhandled_count(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    await ensure_admin_can_manage_reports(current_user)
+
+    result = await db.execute(
+        select(func.count(Report.id)).where(
+            Report.status.in_(["PENDING", "IN_REVIEW"])
+        )
+    )
+
+    return {"count": int(result.scalar_one() or 0)}
+
+
 @router.patch("/{report_id}")
 async def update_admin_report_status(
     report_id: UUID,
@@ -293,6 +309,7 @@ async def update_admin_report_status(
     new_score: float | None = None
     warn_count: int | None = None
     trust_row = None
+
     if previous_status != "APPROVED" and next_status == "APPROVED":
         new_score, warn_count, trust_row = await _apply_report_penalty(
             db,
@@ -314,18 +331,24 @@ async def update_admin_report_status(
             db,
             report=updated_report,
         )
+
         if updated_report.target_type == "USER":
             await notify_report_result_to_target(
                 db,
                 report=updated_report,
             )
+
         if updated_report.target_type == "USER" and new_score is not None:
             message = _build_target_warning_message(
                 updated_report,
                 _resolve_auto_report_penalty(updated_report),
                 new_score,
             )
-            if updated_report.action_result_code in {"PERMANENT_BAN", "TEMP_SUSPENSION"}:
+
+            if updated_report.action_result_code in {
+                "PERMANENT_BAN",
+                "TEMP_SUSPENSION",
+            }:
                 await notify_report_penalty_to_target(
                     db,
                     report=updated_report,
@@ -352,11 +375,13 @@ async def update_admin_report_status(
                     report=updated_report,
                     warning_message=message,
                 )
+
     elif next_status == "REJECTED":
         await notify_report_result_to_reporter(
             db,
             report=updated_report,
         )
+
         if updated_report.target_type == "USER":
             await notify_report_result_to_target(
                 db,
