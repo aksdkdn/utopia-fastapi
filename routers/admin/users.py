@@ -2,15 +2,19 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
+from io import BytesIO
+from pathlib import Path
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
+from minio.error import S3Error
 
 from core.config import settings
 from core.database import get_db
+from core.minio_assets import DEFAULT_SERVICE_LOGO_BUCKET, build_minio_client
 from core.redis_client import redis_client
 from core.minio_assets import build_minio_asset_url
 from core.security import require_user
@@ -46,6 +50,7 @@ from schemas.admin import (
     DashboardRecentActivityOut,
     AdminRoleRecordOut,
     AdminRoleUpdateIn,
+    AdminServiceCreateIn,
     AdminServiceRecordOut,
     AdminServiceUpdateIn,
     AdminStatusUpdateIn,
@@ -108,6 +113,29 @@ from .deps import (
 )
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+ALLOWED_SERVICE_LOGO_CONTENT_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/gif",
+    "image/svg+xml",
+}
+
+MAX_SERVICE_LOGO_SIZE = 5 * 1024 * 1024
+
+
+def _ensure_service_logo_bucket_exists() -> None:
+    client = build_minio_client()
+    if not client.bucket_exists(DEFAULT_SERVICE_LOGO_BUCKET):
+        client.make_bucket(DEFAULT_SERVICE_LOGO_BUCKET)
+
+
+def _service_logo_extension(filename: str) -> str:
+    ext = Path(filename).suffix.lower()
+    if ext in {".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg"}:
+        return ext
+    return ".png"
 
 
 def _parse_user_id_or_400(user_id: str) -> uuid.UUID:
@@ -356,6 +384,149 @@ async def get_admin_services(
     )
     rows = result.all()
     return [_serialize_admin_service(service, created_by) for service, created_by in rows]
+
+
+@router.post("/services/logo")
+async def upload_admin_service_logo(
+    file: UploadFile = File(...),
+    _: AdminContext = Depends(require_admin_service_permission),
+):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="파일명을 확인해주세요.")
+
+    content_type = file.content_type or "application/octet-stream"
+    if content_type not in ALLOWED_SERVICE_LOGO_CONTENT_TYPES:
+        raise HTTPException(
+            status_code=400,
+            detail="JPG, PNG, WEBP, GIF, SVG 이미지 파일만 업로드할 수 있습니다.",
+        )
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="빈 파일은 업로드할 수 없습니다.")
+    if len(content) > MAX_SERVICE_LOGO_SIZE:
+        raise HTTPException(status_code=400, detail="로고 이미지는 5MB 이하만 가능합니다.")
+
+    object_name = f"admin-uploads/{uuid.uuid4().hex}{_service_logo_extension(file.filename)}"
+
+    try:
+        client = build_minio_client()
+        _ensure_service_logo_bucket_exists()
+        client.put_object(
+            bucket_name=DEFAULT_SERVICE_LOGO_BUCKET,
+            object_name=object_name,
+            data=BytesIO(content),
+            length=len(content),
+            content_type=content_type,
+        )
+    except S3Error as exc:
+        raise HTTPException(status_code=500, detail="로고 이미지 업로드에 실패했습니다.") from exc
+
+    asset_key = f"{DEFAULT_SERVICE_LOGO_BUCKET}/{object_name}"
+    return {
+        "logoImageKey": asset_key,
+        "logoImageUrl": build_minio_asset_url(asset_key),
+    }
+
+
+@router.post("/services", response_model=AdminServiceRecordOut, status_code=201)
+async def create_admin_service(
+    payload: AdminServiceCreateIn,
+    admin: AdminContext = Depends(require_admin_service_permission),
+    db: AsyncSession = Depends(get_db),
+):
+    name = payload.name.strip()
+    category = payload.category.strip()
+
+    if not name:
+        raise HTTPException(status_code=400, detail="서비스 이름을 입력해주세요.")
+    if not category:
+        raise HTTPException(status_code=400, detail="카테고리를 입력해주세요.")
+
+    duplicate = await db.scalar(
+        select(Service).where(func.lower(Service.name) == name.lower())
+    )
+    if duplicate:
+        raise HTTPException(status_code=400, detail="이미 등록된 서비스 이름입니다.")
+
+    commission_rate = payload.commissionRate
+    original_price = payload.originalPrice
+
+    service = Service(
+        name=name,
+        category=category,
+        max_members=payload.maxMembers,
+        original_price=original_price,
+        monthly_price=round(original_price * (1 + commission_rate)),
+        logo_image_key=(payload.logoImageKey or "").strip() or None,
+        is_active=payload.isActive,
+        commission_rate=commission_rate,
+        leader_discount_rate=payload.leaderDiscountRate,
+        referral_discount_rate=payload.referralDiscountRate,
+        quick_match_fee_rate=payload.quickMatchFeeRate,
+        created_by=admin.user.id,
+    )
+    db.add(service)
+
+    await _append_activity_log(
+        db,
+        actor_user_id=admin.user.id,
+        action_type="admin_service_created",
+        description=f"{service.name} 서비스 추가",
+        path="/api/admin/services",
+    )
+    await _append_system_log(
+        db,
+        level="INFO",
+        service="admin",
+        message=f"서비스 추가: {service.name}",
+        actor=admin.user.nickname,
+        admin_id=admin.user.id,
+    )
+    await db.commit()
+    await db.refresh(service)
+
+    return _serialize_admin_service(service, admin.user)
+
+
+@router.delete("/services/{service_id}", status_code=204)
+async def delete_admin_service(
+    service_id: str,
+    admin: AdminContext = Depends(require_admin_service_permission),
+    db: AsyncSession = Depends(get_db),
+):
+    service = await db.get(Service, service_id)
+    if not service:
+        raise HTTPException(status_code=404, detail="서비스를 찾을 수 없습니다.")
+
+    linked_party_count = await db.scalar(
+        select(func.count()).select_from(Party).where(Party.service_id == service.id)
+    ) or 0
+    if linked_party_count > 0:
+        raise HTTPException(
+            status_code=400,
+            detail="이미 파티에 사용 중인 서비스는 삭제할 수 없습니다.",
+        )
+
+    service_name = service.name
+    await db.delete(service)
+
+    await _append_activity_log(
+        db,
+        actor_user_id=admin.user.id,
+        action_type="admin_service_deleted",
+        description=f"{service_name} 서비스 삭제",
+        path=f"/api/admin/services/{service_id}",
+    )
+    await _append_system_log(
+        db,
+        level="WARN",
+        service="admin",
+        message=f"서비스 삭제: {service_name}",
+        actor=admin.user.nickname,
+        admin_id=admin.user.id,
+    )
+    await db.commit()
 
 
 @router.patch("/services/{service_id}", response_model=AdminServiceRecordOut)

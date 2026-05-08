@@ -90,6 +90,7 @@ def _calc_payment(
 ) -> tuple[int, float, int, str | None, str]:
     discount_rate = 0.0
     reasons: list[str] = []
+    quick_match_fee_rate = 0.0
 
     if is_leader and service and service.leader_discount_rate:
         d = float(service.leader_discount_rate)
@@ -101,9 +102,6 @@ def _calc_payment(
         discount_rate += d
         reasons.append(f"추천인 할인 {int(d * 100)}%")
 
-    discount_rate = min(discount_rate, 1.0)
-    amount = round(base_amount * (1 - discount_rate))
-
     base_commission_rate = (
         float(service.commission_rate)
         if service and service.commission_rate is not None
@@ -111,11 +109,15 @@ def _calc_payment(
     )
 
     if is_quick_match and service and service.quick_match_fee_rate is not None:
-        commission_rate = base_commission_rate + float(service.quick_match_fee_rate)
+        quick_match_fee_rate = float(service.quick_match_fee_rate)
+        commission_rate = base_commission_rate + quick_match_fee_rate
         pricing_type = "quick_match"
     else:
         commission_rate = base_commission_rate
         pricing_type = "normal"
+
+    net_adjustment_rate = max(min(quick_match_fee_rate - discount_rate, 1.0), -1.0)
+    amount = round(base_amount * (1 + net_adjustment_rate))
 
     commission_amount = (
         round(amount * commission_rate / (1 + commission_rate))

@@ -140,8 +140,12 @@ class AdminPaymentRecordOut(_BaseModel):
     basePrice: int
     amount: int
     discountReason: str | None
+    baseCommissionRate: float
     commissionRate: float
+    effectiveCommissionRate: float
     commissionAmount: int
+    appliedLeaderDiscountRate: float
+    appliedReferralDiscountRate: float
     paymentMethod: str | None
     status: str
     billingMonth: str
@@ -222,6 +226,16 @@ async def get_admin_payments(
 
         commission_rate = float(payment.commission_rate or 0)
         commission_amount = int(payment.commission_amount or 0)
+        applied_leader_discount_rate = (
+            float(service.leader_discount_rate or 0)
+            if payment.discount_reason and "방장 할인" in payment.discount_reason and service
+            else 0.0
+        )
+        applied_referral_discount_rate = (
+            float(service.referral_discount_rate or 0)
+            if payment.discount_reason and "추천인 할인" in payment.discount_reason and service
+            else 0.0
+        )
 
         quick_match_fee_rate = 0.0
         if payment.pricing_type == "quick_match":
@@ -232,6 +246,14 @@ async def get_admin_payments(
                     commission_rate - float(service.commission_rate or 0),
                     0.0,
                 )
+
+        base_commission_rate = max(commission_rate - quick_match_fee_rate, 0.0)
+        effective_commission_rate = max(
+            commission_rate
+            - applied_leader_discount_rate
+            - applied_referral_discount_rate,
+            0.0,
+        )
 
         items.append(
             AdminPaymentRecordOut(
@@ -246,8 +268,12 @@ async def get_admin_payments(
                 basePrice=base_price,
                 amount=amount,
                 discountReason=payment.discount_reason,
+                baseCommissionRate=base_commission_rate,
                 commissionRate=commission_rate,
+                effectiveCommissionRate=effective_commission_rate,
                 commissionAmount=commission_amount,
+                appliedLeaderDiscountRate=applied_leader_discount_rate,
+                appliedReferralDiscountRate=applied_referral_discount_rate,
                 paymentMethod=payment.payment_method,
                 status=payment.status,
                 billingMonth=payment.billing_month,

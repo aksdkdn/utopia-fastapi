@@ -182,6 +182,8 @@ async def get_admin_parties(
         else:
             payment_note = "정상 납부"
 
+        member_count = await _recalculate_party_member_count(db, party)
+
         items.append(
             AdminPartyRecordOut(
                 id=str(party.id),
@@ -191,10 +193,10 @@ async def get_admin_parties(
                 category=service.category,
                 leaderId=str(user.id),
                 leaderNickname=user.nickname,
-                memberCount=party.current_members,
+                memberCount=member_count,
                 status=status_label,
                 reportCount=int(report_count),
-                monthlyAmount=party.monthly_per_person * party.current_members,
+                monthlyAmount=(party.monthly_per_person or 0) * member_count,
                 lastPayment=payment_note,
             )
         )
@@ -255,6 +257,7 @@ async def force_end_admin_party(
     ) or 0
     service = await db.get(Service, party.service_id)
     host = await db.get(User, party.leader_id)
+    member_count = await _recalculate_party_member_count(db, party)
 
     return AdminPartyRecordOut(
         id=str(party.id),
@@ -264,10 +267,10 @@ async def force_end_admin_party(
         category=service.category if service else "-",
         leaderId=str(host.id) if host else str(party.leader_id),
         leaderNickname=host.nickname if host else str(party.leader_id),
-        memberCount=party.current_members,
+        memberCount=member_count,
         status=_party_status_label(party, int(report_count)),
         reportCount=int(report_count),
-        monthlyAmount=party.monthly_per_person * party.current_members,
+        monthlyAmount=(party.monthly_per_person or 0) * member_count,
         lastPayment="종료됨",
     )
 
