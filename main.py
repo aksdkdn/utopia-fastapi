@@ -15,8 +15,10 @@ from sqlalchemy import text
 from core.config import settings
 from core.database import AsyncSessionLocal, Base, engine
 from models.admin import ActivityLog
+from models.party import PartyNotice  # noqa: F401 — Base.metadata 등록용
 
 from routers import admin, assets, auth, behavior_captcha, captcha, chat, notifications, parties, report, ws_notifications, payments, admin_handocr, praises, search, siteverify
+from routers.settlement import router as settlement_router
 
 from routers.mypage import profile, trust_history
 from routers.user import referrers
@@ -148,6 +150,34 @@ async def lifespan(app: FastAPI):
                                 WHEN ip_address IS NULL OR btrim(ip_address::text) = '''' THEN NULL
                                 ELSE ip_address::inet
                             END
+                        ';
+                    END IF;
+
+                    -- payment_deadline 컬럼 추가 (파티 인원 충족 시 결제 마감일)
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.columns
+                        WHERE table_schema = 'public'
+                          AND table_name = 'parties'
+                          AND column_name = 'payment_deadline'
+                    ) THEN
+                        EXECUTE 'ALTER TABLE parties ADD COLUMN payment_deadline TIMESTAMPTZ';
+                    END IF;
+
+                    -- party_notices 테이블 생성 (채팅방 상단 공지)
+                    IF NOT EXISTS (
+                        SELECT 1 FROM information_schema.tables
+                        WHERE table_schema = 'public'
+                          AND table_name = 'party_notices'
+                    ) THEN
+                        EXECUTE '
+                            CREATE TABLE party_notices (
+                                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                                party_id UUID UNIQUE NOT NULL REFERENCES parties(id) ON DELETE CASCADE,
+                                created_by UUID NOT NULL REFERENCES users(id),
+                                content TEXT NOT NULL,
+                                created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                                updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                            )
                         ';
                     END IF;
 
@@ -347,6 +377,7 @@ async def admin_access_log_middleware(request: Request, call_next):
 app.include_router(auth.router, prefix="/api")
 app.include_router(parties.router, prefix="/api")
 app.include_router(payments.router, prefix="/api")
+app.include_router(settlement_router, prefix="/api")
 app.include_router(quick_match_router, prefix="/api")
 app.include_router(notifications.router, prefix="/api")
 app.include_router(ws_notifications.router)
