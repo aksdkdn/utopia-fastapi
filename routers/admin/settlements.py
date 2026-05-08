@@ -191,6 +191,34 @@ async def update_admin_settlement_status(
     party = await db.get(Party, stl.party_id)
     leader = await db.get(User, stl.leader_id)
 
+    # 관리자 approved 처리 → 방장 알림 + WebSocket 브로드캐스트
+    if next_status == "approved" and party:
+        from services.notification_service import notify_user
+        await notify_user(
+            db=db,
+            user_id=stl.leader_id,
+            type="settlement",
+            title="정산 승인 완료 (관리자)",
+            message=f"[{party.title}] 정산이 관리자에 의해 승인되었습니다. 아이디/비밀번호를 공유해주세요.",
+            reference_type="settlement",
+            reference_id=party.id,
+            metadata={
+                "event_code": "SETTLEMENT_ADMIN_APPROVED",
+                "party_id": str(party.id),
+                "settlement_id": str(stl.id),
+            },
+        )
+        try:
+            from routers.chat import manager
+            await manager.broadcast(str(party.id), {
+                "type": "settlement_approved",
+                "party_id": str(party.id),
+                "settlement_id": str(stl.id),
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            })
+        except Exception:
+            pass
+
     return SettlementRecordOut(
         id=str(stl.id),
         partyId=str(stl.party_id),

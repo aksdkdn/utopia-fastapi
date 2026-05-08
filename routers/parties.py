@@ -13,6 +13,7 @@ from core.config import settings
 from core.database import get_db
 from core.minio_assets import build_minio_asset_url
 from core.security import require_user, get_current_user_optional
+from tasks.payment_deadline import sync_payment_deadline
 from models.admin import ActivityLog
 from models.party import Party, PartyMember, Service
 from models.user import User
@@ -626,6 +627,7 @@ async def leave_party(
         member.left_at = func.now()
         await _sync_member_count(db, party)
         party.current_members = max(0, party.current_members - 1)
+        await sync_payment_deadline(db, party)
 
         await create_activity_log(
             db=db,
@@ -675,6 +677,7 @@ async def kick_member(
         target.left_at = func.now()
         await _sync_member_count(db, party)
         party.current_members = max(0, party.current_members - 1)
+        await sync_payment_deadline(db, party)
         await db.commit()
     except Exception as e:
         await db.rollback()
@@ -796,6 +799,7 @@ async def approve_application(
         target.approved_at = func.now()
         target.rejected_at = None
         party.current_members = current_count + 1
+        await sync_payment_deadline(db, party)
 
         await create_activity_log(
             db=db,

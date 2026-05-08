@@ -14,6 +14,7 @@ celery_app = Celery(
     include=[
         "tasks.email_tasks",
         "tasks.party_trust_bonus",
+        "tasks.payment_deadline",
     ],
 )
 
@@ -30,6 +31,11 @@ celery_app.conf.update(
         "party-trust-bonus-daily": {
             "task": "tasks.party_trust_bonus.run_party_trust_bonus",
             "schedule": 86400,  # 24h (초 단위)
+        },
+        # 매 10분마다 결제 마감일 초과 미결제 멤버 노쇼 처리
+        "payment-deadline-check": {
+            "task": "tasks.payment_deadline.check_payment_deadline",
+            "schedule": 600,  # 10분
         },
     },
 )

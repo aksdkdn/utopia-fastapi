@@ -182,6 +182,7 @@ async def get_party_info(
         "category_name": service.category if service else None,
         "service_name": service.name if service else None,
         "host_nickname": party.host.nickname if party.host else None,
+        "payment_deadline": party.payment_deadline.isoformat() if party.payment_deadline else None,
         "members": members,
     }
 

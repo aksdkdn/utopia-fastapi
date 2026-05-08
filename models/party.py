@@ -23,6 +23,8 @@ class Party(Base):
     current_members: Mapped[int | None] = mapped_column(Integer, server_default="1")
     monthly_per_person: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="recruiting")
+    # 파티 인원 충족 시 결제 마감일 (3일), 인원 미달 시 NULL
+    payment_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     min_trust_score: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
     start_date: Mapped[date | None] = mapped_column(Date)
     end_date: Mapped[date | None] = mapped_column(Date)
@@ -170,6 +172,32 @@ class Service(Base):
     parties: Mapped[list["Party"]] = relationship("Party", back_populates="service")
 
 from sqlalchemy import JSON
+
+
+class PartyNotice(Base):
+    """채팅방 상단 공지 (방장만 작성/수정/삭제 가능)"""
+    __tablename__ = "party_notices"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    party_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("parties.id"), nullable=False, unique=True
+    )
+    created_by: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    party: Mapped["Party"] = relationship("Party")
+    author: Mapped["User"] = relationship("User", foreign_keys=[created_by])
+
 
 class PartyEmbedding(Base):
     __tablename__ = "party_embeddings"
