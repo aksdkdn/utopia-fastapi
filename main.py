@@ -30,10 +30,11 @@ from routers.quick_match import router as quick_match_router
 from routers.admin_moderation_config import router as admin_mod_config_router
 from routers.admin.cloud_monitor import router as admin_cloud_monitor_router
 from routers.admin.saas_admin import router as admin_saas_router
+from routers.admin.saas_admin_v2 import router as admin_saas_v2_router
 from routers.admin import admin_quick_match
 from routers.appeal import router as appeal_router
-from routers.appeal import router as appeal_router
 from routers.developer import router as developer_router
+from routers.developer_v2 import router as developer_v2_router
 
 logging.basicConfig(level=logging.DEBUG)
 
@@ -336,6 +337,13 @@ _ADMIN_PATH_LABELS: list[tuple[str, str, str]] = [
     ("GET",    "/api/admin/cloud-monitor/debug/labels",         "클라우드 모니터링 디버그 레이블 조회"),
     ("GET",    "/api/admin/cloud-monitor/debug/raw",            "클라우드 모니터링 디버그 원본 조회"),
     ("GET",    "/api/admin/cloud-monitor/debug/disk-unit",      "클라우드 모니터링 디스크 단위 조회"),
+    # SaaS v2
+    ("GET",    "/api/admin/saas-v2/keys",                       "SaaS v2 키 목록 조회"),
+    ("POST",   "/api/admin/saas-v2/keys",                       "SaaS v2 키 발급"),
+    ("GET",    "/api/admin/saas-v2/keys/",                      "SaaS v2 키 상세 조회"),
+    ("PUT",    "/api/admin/saas-v2/keys/",                      "SaaS v2 키 수정"),
+    ("POST",   "/api/admin/saas-v2/keys/",                      "SaaS v2 키 액션"),
+    ("GET",    "/api/admin/saas-v2/stats",                      "SaaS v2 통계 조회"),
 ]
 
 
@@ -390,7 +398,6 @@ app.include_router(assets.router, prefix="/api", tags=["Assets"])
 app.include_router(admin.router, prefix="/api")  
 app.include_router(report.router, prefix="/api")  
 
-
 app.include_router(profile.router, prefix="/api")
 app.include_router(mypage_parties.router, prefix="/api")
 app.include_router(trust_history.router, prefix="/api")
@@ -400,20 +407,17 @@ app.include_router(referrers.router, prefix="/api")
 app.include_router(admin_mod_config_router, prefix="/api")
 app.include_router(admin_cloud_monitor_router, prefix="/api")
 app.include_router(admin_saas_router, prefix="/api")
+app.include_router(admin_saas_v2_router, prefix="/api")
 app.include_router(admin_quick_match.router, prefix="/api")
 app.include_router(appeal_router)
 app.include_router(developer_router, prefix="/api")
-
-app.include_router(appeal_router)
+app.include_router(developer_v2_router, prefix="/api")
 
 app.include_router(admin_handocr.router, prefix="/api")
 
-
 app.include_router(praises.router, prefix='/api')
 
-
 app.include_router(search.router, prefix='/api')
-
 
 _sdk_dir = Path(__file__).resolve().parent / "sdk"
 if _sdk_dir.is_dir():
