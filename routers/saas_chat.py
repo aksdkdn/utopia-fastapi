@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
 
 from core.saas_key_auth import verify_saas_key
-from schemas.sass import SaasKeyContext
+from schemas.saas import SaasKeyContext
 from services.chat.moderation import check_message
 
 router = APIRouter(prefix="/saas/chat", tags=["SaaS Chat Filter"])
