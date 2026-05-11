@@ -173,6 +173,7 @@ async def get_party_info(
         "party_id": str(party.id),
         "title": party.title,
         "status": party.status.lower() if party.status else None,
+        "min_trust_score": float(party.min_trust_score or 0),
         "max_members": _party_max_members(party, service),
         "member_count": _party_member_count(party, members),
         "monthly_price": _party_total_price(party, service),

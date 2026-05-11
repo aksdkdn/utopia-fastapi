@@ -5,6 +5,7 @@ from typing import Optional, Any
 
 import redis.asyncio as redis
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select, case
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -42,6 +43,10 @@ router = APIRouter(prefix="/parties", tags=["parties"])
 logger = logging.getLogger(__name__)
 
 redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+
+
+class PartyTitleUpdateIn(BaseModel):
+    title: str = Field(..., min_length=2, max_length=100)
 
 
 async def _broadcast_party_updated(party_id: uuid.UUID) -> None:
@@ -745,6 +750,48 @@ async def transfer_leader(
         raise HTTPException(status_code=500, detail="리더 위임 처리 중 오류가 발생했습니다.")
 
     return MessageOut(message="리더를 위임했습니다.")
+
+
+@router.patch("/{party_id}/title", response_model=MessageOut)
+async def update_party_title(
+    party_id: uuid.UUID,
+    body: PartyTitleUpdateIn,
+    current_user: User = Depends(require_user),
+    db: AsyncSession = Depends(get_db),
+):
+    party = await _load_party_with_members(db, party_id)
+
+    if party.leader_id != current_user.id:
+        raise HTTPException(status_code=403, detail="리더만 파티명을 변경할 수 있습니다.")
+
+    next_title = body.title.strip()
+    if len(next_title) < 2:
+        raise HTTPException(status_code=400, detail="파티명은 2자 이상이어야 합니다.")
+
+    previous_title = party.title
+    party.title = next_title
+
+    try:
+        await create_activity_log(
+            db=db,
+            user_id=current_user.id,
+            action="UPDATE_PARTY_TITLE",
+            description="파티명 변경",
+            metadata={"before": previous_title, "after": next_title},
+            target_id=party.id,
+        )
+        await db.commit()
+    except Exception as e:
+        await db.rollback()
+        logger.error(f"Error updating party title: {e}")
+        raise HTTPException(status_code=500, detail="파티명 변경 중 오류가 발생했습니다.")
+
+    await _broadcast_party_updated(party_id)
+    await _broadcast_system_message(
+        party_id,
+        f"파티명이 '{previous_title}'에서 '{next_title}'(으)로 변경되었습니다.",
+    )
+    return MessageOut(message="파티명을 변경했습니다.")
 
 
 @router.get("/{party_id}/applications", response_model=PartyMembersOut)
