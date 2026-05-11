@@ -59,6 +59,7 @@ from schemas.admin import (
     DashboardSeriesPointOut,
     ReceiptRecordOut,
     ReportRecordOut,
+    SettlementParticipantPaymentOut,
     SettlementRecordOut,
     SystemLogRecordOut,
     UserStatusLogOut,
@@ -103,6 +104,76 @@ from .deps import (
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
+
+def _settlement_payment_status_label(value: str | None) -> str:
+    return {
+        "approved": "승인",
+        "pending": "대기",
+        "rejected": "거절",
+        "cancelled": "취소",
+    }.get((value or "").lower(), "대기")
+
+
+async def _build_settlement_participant_payments(
+    db: AsyncSession,
+    party: Party,
+    billing_month: str,
+) -> list[SettlementParticipantPaymentOut]:
+    members = (
+        await db.execute(
+            select(PartyMember, User)
+            .join(User, PartyMember.user_id == User.id)
+            .where(
+                PartyMember.party_id == party.id,
+                PartyMember.status == "active",
+            )
+        )
+    ).all()
+
+    payment_rows = (
+        await db.execute(
+            select(Payment.user_id, Payment.status).where(
+                Payment.party_id == party.id,
+                Payment.billing_month == billing_month,
+            )
+        )
+    ).all()
+    payment_status_map = {user_id: status for user_id, status in payment_rows}
+
+    participant_rows: list[SettlementParticipantPaymentOut] = []
+    leader_in_members = False
+
+    for member, user in members:
+        if user.id == party.leader_id:
+            leader_in_members = True
+        participant_rows.append(
+            SettlementParticipantPaymentOut(
+                userId=str(user.id),
+                nickname=user.nickname,
+                role="파티장" if member.role == "leader" else "멤버",
+                paymentStatus=_settlement_payment_status_label(
+                    payment_status_map.get(user.id)
+                ),
+            )
+        )
+
+    if party.leader_id and not leader_in_members:
+        leader = await db.get(User, party.leader_id)
+        if leader:
+            participant_rows.append(
+                SettlementParticipantPaymentOut(
+                    userId=str(leader.id),
+                    nickname=leader.nickname,
+                    role="파티장",
+                    paymentStatus=_settlement_payment_status_label(
+                        payment_status_map.get(leader.id)
+                    ),
+                )
+            )
+
+    participant_rows.sort(key=lambda item: (0 if item.role == "파티장" else 1, item.nickname))
+    return participant_rows
+
 @router.get("/settlements", response_model=list[SettlementRecordOut])
 async def get_admin_settlements(
     _: AdminContext = Depends(require_admin_settlement_permission),
@@ -132,7 +203,7 @@ async def get_admin_settlements(
     for stl, party, leader in rows:
         status_label = _settlement_status_label(stl.status)
         party_name = party.title
-        leader_name = _user_display_name(leader)
+        leader_name = leader.nickname
         if status_filter and status_label != status_filter:
             continue
         if q and not (
@@ -157,6 +228,9 @@ async def get_admin_settlements(
                 billingMonth=stl.billing_month,
                 status=status_label,
                 createdAt=_format_datetime(stl.created_at),
+                participantPayments=await _build_settlement_participant_payments(
+                    db, party, stl.billing_month
+                ),
             )
         )
     return items
@@ -224,10 +298,15 @@ async def update_admin_settlement_status(
         partyId=str(stl.party_id),
         partyName=party.title if party else str(stl.party_id),
         leaderId=str(stl.leader_id),
-        leaderName=_user_display_name(leader),
+        leaderName=leader.nickname if leader else str(stl.leader_id),
         totalAmount=stl.total_amount,
         memberCount=stl.member_count,
         billingMonth=stl.billing_month,
         status=_settlement_status_label(stl.status),
         createdAt=_format_datetime(stl.created_at),
+        participantPayments=(
+            await _build_settlement_participant_payments(db, party, stl.billing_month)
+            if party
+            else []
+        ),
     )

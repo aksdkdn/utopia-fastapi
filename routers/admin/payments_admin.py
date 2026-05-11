@@ -166,6 +166,66 @@ class AdminPaymentListOut(_BaseModel):
     totalPages: int
 
 
+async def _get_party_active_member_ids(
+    db: AsyncSession,
+    party: Party,
+) -> list[Any]:
+    member_ids = (
+        await db.execute(
+            select(PartyMember.user_id).where(
+                PartyMember.party_id == party.id,
+                PartyMember.status == "active",
+            )
+        )
+    ).scalars().all()
+    if party.leader_id and party.leader_id not in member_ids:
+        member_ids.append(party.leader_id)
+    return member_ids
+
+
+async def _sync_related_settlement_status(
+    db: AsyncSession,
+    party: Party,
+    billing_month: str,
+) -> tuple[Settlement | None, bool]:
+    settlement = (
+        await db.execute(
+            select(Settlement).where(
+                Settlement.party_id == party.id,
+                Settlement.billing_month == billing_month,
+            )
+        )
+    ).scalar_one_or_none()
+    if settlement is None:
+        return None, False
+
+    member_ids = await _get_party_active_member_ids(db, party)
+    paid_ids = set(
+        (
+            await db.execute(
+                select(Payment.user_id).where(
+                    Payment.party_id == party.id,
+                    Payment.billing_month == billing_month,
+                    Payment.status == "approved",
+                )
+            )
+        ).scalars().all()
+    )
+    all_paid = all(member_id in paid_ids for member_id in member_ids)
+
+    auto_approved = False
+    if all_paid and settlement.status != "approved":
+        settlement.status = "approved"
+        settlement.approved_at = datetime.now(timezone.utc)
+        auto_approved = True
+    elif not all_paid and settlement.status == "approved":
+        settlement.status = "pending"
+        settlement.approved_at = None
+        settlement.approved_by = None
+
+    return settlement, auto_approved
+
+
 def _payment_status_label(value: str) -> str:
     return {
         "pending": "대기",
@@ -336,12 +396,21 @@ async def update_admin_payment_status(
         raise HTTPException(status_code=404, detail="결제 데이터를 찾을 수 없습니다.")
 
     next_status = _payment_status_code(payload.status)
-    if next_status not in {"pending", "approved", "rejected"}:
-        raise HTTPException(status_code=400, detail="결제 상태는 대기, 승인, 거절만 변경할 수 있습니다.")
+    if next_status not in {"pending", "approved", "rejected", "cancelled"}:
+        raise HTTPException(status_code=400, detail="결제 상태는 대기, 승인, 거절, 취소만 변경할 수 있습니다.")
 
     payment.status = next_status
     if next_status == "approved":
         payment.paid_at = payment.paid_at or datetime.now(timezone.utc)
+
+    party = await db.get(Party, payment.party_id)
+    settlement, auto_approved = (None, False)
+    if party:
+        settlement, auto_approved = await _sync_related_settlement_status(
+            db,
+            party,
+            payment.billing_month,
+        )
 
     await _append_activity_log(
         db,
@@ -351,6 +420,38 @@ async def update_admin_payment_status(
         path=f"/api/admin/payments/{payment_id}",
     )
     await db.commit()
+
+    if auto_approved and settlement and party:
+        from services.notification_service import notify_user
+
+        await notify_user(
+            db=db,
+            user_id=settlement.leader_id,
+            type="settlement",
+            title="정산 자동 승인 완료",
+            message=f"[{party.title}] 모든 멤버 결제가 확인되어 정산이 자동 승인되었습니다. 아이디/비밀번호를 공유해주세요.",
+            reference_type="settlement",
+            reference_id=party.id,
+            metadata={
+                "event_code": "SETTLEMENT_AUTO_APPROVED_FROM_PAYMENT",
+                "party_id": str(party.id),
+                "settlement_id": str(settlement.id),
+            },
+        )
+        try:
+            from routers.chat import manager
+
+            await manager.broadcast(
+                str(party.id),
+                {
+                    "type": "settlement_approved",
+                    "party_id": str(party.id),
+                    "settlement_id": str(settlement.id),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+        except Exception:
+            pass
 
     stmt = (
         select(Payment, User, Party, Service)
