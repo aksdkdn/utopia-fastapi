@@ -14,6 +14,7 @@ from sqlalchemy.orm import selectinload
 from core.database import get_db
 from core.security import get_current_user
 from models.mypage.trust_score import TrustScore
+from models.party import Party, PartyChat
 from models.report import Report, ReportEvidence
 from models.user import User
 from services.notifications.report_notification_service import (
@@ -81,12 +82,93 @@ def normalize_admin_report_status(status: str) -> str:
     return STATUS_TO_API[normalized]
 
 
-def build_admin_report_response(report: Report) -> dict[str, Any]:
+def _user_display_name(user: User | None) -> str | None:
+    if not user:
+        return None
+    if user.nickname and user.name:
+        return f"{user.nickname} ({user.name})"
+    return user.nickname or user.name or user.email
+
+
+async def _report_target_display_map(
+    db: AsyncSession,
+    reports: list[Report],
+) -> dict[tuple[str, UUID], str]:
+    display_map: dict[tuple[str, UUID], str] = {}
+    user_ids = {report.target_id for report in reports if report.target_type.lower() == "user"}
+    party_ids = {report.target_id for report in reports if report.target_type.lower() in {"party", "chat"}}
+    chat_ids = {report.target_id for report in reports if report.target_type.lower() == "chat"}
+
+    users_by_id: dict[UUID, User] = {}
+    parties_by_id: dict[UUID, Party] = {}
+    chats_by_id: dict[UUID, PartyChat] = {}
+
+    if user_ids:
+        user_rows = (await db.execute(select(User).where(User.id.in_(user_ids)))).scalars().all()
+        users_by_id = {user.id: user for user in user_rows}
+    if party_ids:
+        party_rows = (await db.execute(select(Party).where(Party.id.in_(party_ids)))).scalars().all()
+        parties_by_id = {party.id: party for party in party_rows}
+    if chat_ids:
+        chat_rows = (await db.execute(select(PartyChat).where(PartyChat.id.in_(chat_ids)))).scalars().all()
+        chats_by_id = {chat.id: chat for chat in chat_rows}
+        sender_ids = {chat.sender_id for chat in chat_rows if chat.sender_id is not None}
+        missing_user_ids = sender_ids - set(users_by_id.keys())
+        if missing_user_ids:
+            sender_rows = (
+                await db.execute(select(User).where(User.id.in_(missing_user_ids)))
+            ).scalars().all()
+            users_by_id.update({user.id: user for user in sender_rows})
+
+    for report in reports:
+        target_type = report.target_type.lower()
+        display_name = report.target_snapshot_name
+
+        if target_type == "user":
+            display_name = display_name or _user_display_name(users_by_id.get(report.target_id))
+        elif target_type == "party":
+            target_party = parties_by_id.get(report.target_id)
+            display_name = display_name or (target_party.title if target_party else None)
+        elif target_type == "chat":
+            target_chat = chats_by_id.get(report.target_id)
+            if target_chat:
+                target_party = parties_by_id.get(target_chat.party_id)
+                sender = users_by_id.get(target_chat.sender_id)
+                sender_label = _user_display_name(sender) or "채팅 사용자"
+                party_label = target_party.title if target_party else "파티 채팅"
+                display_name = display_name or f"{party_label} / {sender_label}"
+
+        display_map[(target_type, report.target_id)] = display_name or str(report.target_id)
+
+    return display_map
+
+
+async def _reporter_display_map(
+    db: AsyncSession,
+    reports: list[Report],
+) -> dict[UUID, str]:
+    reporter_ids = {report.reporter_id for report in reports}
+    if not reporter_ids:
+        return {}
+
+    reporter_rows = (await db.execute(select(User).where(User.id.in_(reporter_ids)))).scalars().all()
+    return {
+        user.id: _user_display_name(user) or str(user.id)
+        for user in reporter_rows
+    }
+
+
+def build_admin_report_response(
+    report: Report,
+    *,
+    target_display: str | None = None,
+    reporter_display: str | None = None,
+) -> dict[str, Any]:
     return {
         "id": str(report.id),
         "type": report.target_type,
         "target_type": report.target_type,
-        "target": report.target_snapshot_name or str(report.target_id),
+        "target": target_display or report.target_snapshot_name or str(report.target_id),
         "target_id": str(report.target_id),
         "target_snapshot_name": report.target_snapshot_name,
         "reason": report.category,
@@ -97,7 +179,7 @@ def build_admin_report_response(report: Report) -> dict[str, Any]:
         "created_at": report.created_at.isoformat() if report.created_at else None,
         "updated_at": report.updated_at.isoformat() if report.updated_at else None,
         "reporter_id": str(report.reporter_id),
-        "reporter_nickname": None,
+        "reporter_nickname": reporter_display,
         "action_result_code": report.action_result_code,
         "admin_memo": report.admin_memo,
         "reviewed_by": str(report.reviewed_by) if report.reviewed_by else None,
@@ -249,7 +331,17 @@ async def list_admin_reports(
     result = await db.execute(query)
     reports = result.scalars().unique().all()
 
-    return [build_admin_report_response(report) for report in reports]
+    target_display_map = await _report_target_display_map(db, reports)
+    reporter_display_map = await _reporter_display_map(db, reports)
+
+    return [
+        build_admin_report_response(
+            report,
+            target_display=target_display_map.get((report.target_type.lower(), report.target_id)),
+            reporter_display=reporter_display_map.get(report.reporter_id),
+        )
+        for report in reports
+    ]
 
 
 @router.get("/unhandled-count")
@@ -388,7 +480,13 @@ async def update_admin_report_status(
                 report=updated_report,
             )
 
-    return build_admin_report_response(updated_report)
+    target_display_map = await _report_target_display_map(db, [updated_report])
+    reporter_display_map = await _reporter_display_map(db, [updated_report])
+    return build_admin_report_response(
+        updated_report,
+        target_display=target_display_map.get((updated_report.target_type.lower(), updated_report.target_id)),
+        reporter_display=reporter_display_map.get(updated_report.reporter_id),
+    )
 
 
 @router.get("/evidences/{evidence_id}/file")

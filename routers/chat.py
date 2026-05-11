@@ -125,13 +125,18 @@ async def get_party_info(
         )
         paid_user_ids = set(paid_result.scalars().all())
 
+    all_members_paid = bool(unique_member_user_ids) and all(
+        user_id in paid_user_ids for user_id in unique_member_user_ids
+    )
+    payment_status = "completed" if all_members_paid else "pending"
+
     members = [
         _serialize_member(
             user,
             role=member.role,
             status=member.status,
             joined_at=member.joined_at,
-            payment_status="completed" if user.id in paid_user_ids else "pending",
+            payment_status=payment_status,
         )
         for member, user in rows
     ]
@@ -144,7 +149,7 @@ async def get_party_info(
                 role="leader",
                 status="active",
                 joined_at=party.created_at,
-                payment_status="completed" if party.host.id in paid_user_ids else "pending",
+                payment_status=payment_status,
             ),
         )
 
