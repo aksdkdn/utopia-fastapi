@@ -1,16 +1,9 @@
-"""
-이의제기 라우터
-- POST   /api/appeals                유저: 이의제기 신청 (정지 상태에서도 가능)
-- GET    /api/appeals/my             유저: 내 이의제기 목록
-- GET    /api/admin/appeals          관리자: 전체 목록
-- PATCH  /api/admin/appeals/{id}     관리자: 승인/거부
-"""
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.database import get_db
@@ -18,6 +11,7 @@ from core.security import get_current_user
 from models.admin import AdminRole, ModerationAction
 from models.appeal import BanAppeal
 from models.mypage.trust_score import TrustScore
+from models.party import PartyMember
 from models.refresh_token import RefreshToken
 from models.user import User
 from schemas.appeal import (
@@ -253,8 +247,26 @@ async def review_appeal(
         target_user.is_active = True
         target_user.banned_until = None
 
+        # ── 1. Redis 채팅 차단 키 해제 ──────────────────────────
+        from core.redis_client import redis_client as core_redis
+        from services.chat.serializers import blocked_key
+        await core_redis.delete(blocked_key(str(target_user.id)))
+
+        # ── 2. PartyMember banned 상태 → active 복구 ────────────
+        await db.execute(
+            update(PartyMember)
+            .where(
+                PartyMember.user_id == target_user.id,
+                PartyMember.status == "banned",
+            )
+            .values(status="active")
+        )
+
+        # ── 3. chat_warn_count 초기화 ────────────────────────────
+        target_user.chat_warn_count = 0
+
+        # ── 4. IP 차단 해제 (ip_ban 타입인 경우) ─────────────────
         if appeal.ban_type == BAN_TYPE_IP:
-            from core.redis_client import redis_client
             token_row = await db.scalar(
                 select(RefreshToken)
                 .where(RefreshToken.user_id == target_user.id)
@@ -262,8 +274,9 @@ async def review_appeal(
                 .limit(1)
             )
             if token_row and token_row.ip_address:
-                await redis_client.delete(f"ip:banned:{token_row.ip_address}")
+                await core_redis.delete(f"ip:banned:{token_row.ip_address}")
 
+        # ── 5. 신뢰도 점수 복구 ──────────────────────────────────
         if appeal.ban_reference_id:
             trust_row = await db.get(TrustScore, appeal.ban_reference_id)
             if trust_row and float(trust_row.change_amount) < 0:
