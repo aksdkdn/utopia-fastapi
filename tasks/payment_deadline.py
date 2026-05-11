@@ -1,16 +1,3 @@
-"""
-결제 마감일(payment_deadline) 관련 태스크
-
-1. check_payment_deadline  : Celery beat 매 10분 실행
-   - 마감일 지난 미결제 멤버 → 강퇴 + 신뢰도 -5
-   - 강퇴 후 인원 미달이면 payment_deadline = NULL, status = recruiting
-   - 아직 꽉 찼으면 3일 다시 부여
-
-2. sync_payment_deadline : parties 라우터에서 인원 변동 시 직접 await 호출
-   - 인원 꽉 찼으면 payment_deadline = now + 3일 (기존 deadline 없을 때만)
-   - 인원 미달이면 payment_deadline = NULL, status = recruiting
-"""
-
 import asyncio
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -132,11 +119,7 @@ def check_payment_deadline(self):
         raise self.retry(exc=exc)
 
 
-async def sync_payment_deadline(db, party: Party) -> None:
-    """
-    인원 변동 시마다 호출.
-    꽉 찼으면 deadline 신규 설정(기존 있으면 유지), 미달이면 초기화.
-    """
+async def sync_payment_deadline(db, party: Party) -> bool:
     max_m = party.max_members or 0
     current = party.current_members or 0
 
@@ -144,7 +127,10 @@ async def sync_payment_deadline(db, party: Party) -> None:
         if party.payment_deadline is None:
             party.payment_deadline = datetime.now(timezone.utc) + timedelta(days=PAYMENT_DEADLINE_DAYS)
             party.status = "full"
+            return True  # 새로 full이 된 경우
+        return False  # 이미 full 상태였던 경우
     else:
         party.payment_deadline = None
         if party.status == "full":
             party.status = "recruiting"
+        return False
