@@ -1231,23 +1231,31 @@ async def generate_captcha_images(
         try:
             await redis_client.set("captcha:generate:progress", "generating")
 
-            # generate_and_register.py는 fastapi/ 상위 디렉토리(프로젝트 루트)에 위치
-            # __file__ = fastapi/routers/admin/captcha_admin.py → parents[3] = 프로젝트 루트
-            project_root = str(Path(__file__).resolve().parents[3])
-            script_path = str(Path(project_root) / "generate_and_register.py")
+            # GPU 서버(10.10.0.10)에서 generate_and_register.py 실행 (SSH)
+            GPU_HOST = "ubuntu@10.10.0.10"
+            GPU_KEY = "/home/ubuntu/.ssh/t1_keypair.pem"
+            GPU_SCRIPT_DIR = "/home/ubuntu/ganpipeline"
+
+            remote_cmd = (
+                f"cd {GPU_SCRIPT_DIR} && "
+                f"python generate_and_register.py "
+                f"--categories {cats} "
+                f"--num_per_category {num_per_category} "
+                f"--num_sets {num_sets}"
+            )
 
             cmd = [
-                "python", script_path,
-                "--categories", cats,
-                "--num_per_category", str(num_per_category),
-                "--num_sets", str(num_sets),
+                "ssh", "-i", GPU_KEY,
+                "-o", "StrictHostKeyChecking=no",
+                "-o", "ConnectTimeout=10",
+                GPU_HOST,
+                remote_cmd,
             ]
 
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
-                cwd=project_root,
             )
             stdout, _ = await process.communicate()
             output = stdout.decode("utf-8", errors="replace") if stdout else ""
