@@ -286,6 +286,13 @@ class ReceiptRecordOut(BaseModel):
     createdAt: str
 
 
+class SettlementParticipantPaymentOut(BaseModel):
+    userId: str
+    nickname: str
+    role: str
+    paymentStatus: str
+
+
 class SettlementRecordOut(BaseModel):
     id: str
     partyId: str
@@ -297,6 +304,7 @@ class SettlementRecordOut(BaseModel):
     billingMonth: str
     status: str
     createdAt: str
+    participantPayments: list[SettlementParticipantPaymentOut] = []
 
 
 class SystemLogRecordOut(BaseModel):
