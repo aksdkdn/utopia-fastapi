@@ -3,7 +3,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 
 from core.saas_key_auth import verify_saas_key
-from schemas.sass import SaasKeyContext
+from schemas.saas import SaasKeyContext
 from routers.captcha import _start_captcha_logic, _verify_captcha_logic
 
 router = APIRouter(tags=["SaaS Captcha L2"])
