@@ -14,7 +14,7 @@ from core.config import settings
 from core.database import get_db
 from core.minio_assets import build_minio_asset_url
 from core.security import require_user, get_current_user_optional
-from tasks.payment_deadline import sync_payment_deadline
+from tasks.payment_deadline import sync_payment_deadline, PAYMENT_DEADLINE_DAYS
 from models.admin import ActivityLog
 from models.party import Party, PartyMember, Service
 from models.user import User
@@ -72,6 +72,16 @@ async def _broadcast_system_message(party_id: uuid.UUID, content: str) -> None:
         })
     except Exception as e:
         logger.warning(f"[system message broadcast failed] {e}")
+
+
+async def _broadcast_payment_deadline_notice(party_id: uuid.UUID, deadline_str: str) -> None:
+    """모집 완료 시 결제 안내 채팅 공지"""
+    content = (
+        f"[안내] 파티 모집이 완료되었습니다.\n"
+        f"{deadline_str}까지 결제를 완료해주세요.\n"
+        f"기간 내 미결제 시 노쇼 처리되어 신뢰도 -5점 감점 및 파티에서 강제 탈퇴됩니다."
+    )
+    await _broadcast_system_message(party_id, content)
 
 
 async def create_activity_log(
@@ -840,13 +850,14 @@ async def approve_application(
     if current_count >= (party.max_members or 0):
         raise HTTPException(status_code=400, detail="파티 정원이 가득 차서 승인할 수 없습니다.")
 
+    became_full = False
     try:
         target.status = "active"
         target.leader_review_status = "approved"
         target.approved_at = func.now()
         target.rejected_at = None
         party.current_members = current_count + 1
-        await sync_payment_deadline(db, party)
+        became_full = await sync_payment_deadline(db, party)
 
         await create_activity_log(
             db=db,
@@ -878,6 +889,14 @@ async def approve_application(
     )
 
     await _broadcast_party_updated(party_id)
+
+    # 모집 완료(full)가 된 경우 결제 안내 채팅 공지
+    if became_full:
+        from datetime import datetime, timezone, timedelta
+        deadline_dt = party.payment_deadline or (datetime.now(timezone.utc) + timedelta(days=PAYMENT_DEADLINE_DAYS))
+        deadline_str = deadline_dt.strftime("%Y년 %m월 %d일 %H:%M (UTC)")
+        await _broadcast_payment_deadline_notice(party_id, deadline_str)
+
     return MessageOut(message="신청을 승인했습니다.")
 
 
