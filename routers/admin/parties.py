@@ -157,8 +157,6 @@ async def get_admin_parties(
     items: list[AdminPartyRecordOut] = []
     for party, service, user, report_count in rows:
         status_label = _party_status_label(party, int(report_count))
-        if status_filter and status_label != status_filter:
-            continue
         if category_q and category_q != (service.category or "").lower():
             continue
         if q and not (
@@ -181,6 +179,11 @@ async def get_admin_parties(
             payment_note = "정산 대기"
         else:
             payment_note = "정상 납부"
+
+        if status_filter:
+            is_pending_filter = status_filter == "대기" and payment_note == "정산 대기"
+            if not is_pending_filter and status_label != status_filter:
+                continue
 
         member_count = await _recalculate_party_member_count(db, party)
 

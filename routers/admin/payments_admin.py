@@ -166,6 +166,102 @@ class AdminPaymentListOut(_BaseModel):
     totalPages: int
 
 
+def _payment_status_label(value: str) -> str:
+    return {
+        "pending": "대기",
+        "approved": "승인",
+        "rejected": "거절",
+        "completed": "완료",
+        "failed": "실패",
+        "cancelled": "취소",
+        "refunded": "환불",
+    }.get(value.lower(), value)
+
+
+def _payment_status_code(value: str) -> str:
+    return {
+        "대기": "pending",
+        "승인": "approved",
+        "거절": "rejected",
+        "완료": "completed",
+        "실패": "failed",
+        "취소": "cancelled",
+        "환불": "refunded",
+    }.get(value, value.lower())
+
+
+def _build_admin_payment_record(
+    payment: Payment,
+    user: User,
+    party: Party,
+    service: Service | None,
+) -> AdminPaymentRecordOut:
+    role = "방장" if party.leader_id == user.id else "멤버"
+
+    base_price = int(payment.base_price) if payment.base_price else int(payment.amount)
+    discount_rate = _extract_discount_rate(payment.discount_reason, service)
+    expected_amount = round(base_price * (1 - discount_rate))
+    amount = expected_amount if discount_rate > 0 else int(payment.amount)
+
+    commission_rate = float(payment.commission_rate or 0)
+    commission_amount = int(payment.commission_amount or 0)
+    applied_leader_discount_rate = (
+        float(service.leader_discount_rate or 0)
+        if payment.discount_reason and "방장 할인" in payment.discount_reason and service
+        else 0.0
+    )
+    applied_referral_discount_rate = (
+        float(service.referral_discount_rate or 0)
+        if payment.discount_reason and "추천인 할인" in payment.discount_reason and service
+        else 0.0
+    )
+
+    quick_match_fee_rate = 0.0
+    if payment.pricing_type == "quick_match":
+        if service and service.quick_match_fee_rate is not None:
+            quick_match_fee_rate = float(service.quick_match_fee_rate or 0)
+        elif service and service.commission_rate is not None:
+            quick_match_fee_rate = max(
+                commission_rate - float(service.commission_rate or 0),
+                0.0,
+            )
+
+    base_commission_rate = max(commission_rate - quick_match_fee_rate, 0.0)
+    effective_commission_rate = max(
+        commission_rate
+        - applied_leader_discount_rate
+        - applied_referral_discount_rate,
+        0.0,
+    )
+
+    return AdminPaymentRecordOut(
+        id=str(payment.id),
+        userId=str(user.id),
+        userNickname=user.nickname,
+        userName=user.name,
+        partyId=str(party.id),
+        partyTitle=party.title,
+        serviceName=service.name if service else None,
+        role=role,
+        basePrice=base_price,
+        amount=amount,
+        discountReason=payment.discount_reason,
+        baseCommissionRate=base_commission_rate,
+        commissionRate=commission_rate,
+        effectiveCommissionRate=effective_commission_rate,
+        commissionAmount=commission_amount,
+        appliedLeaderDiscountRate=applied_leader_discount_rate,
+        appliedReferralDiscountRate=applied_referral_discount_rate,
+        paymentMethod=payment.payment_method,
+        status=payment.status,
+        billingMonth=payment.billing_month,
+        pricingType=payment.pricing_type,
+        quickMatchFeeRate=quick_match_fee_rate,
+        paidAt=payment.paid_at.isoformat() if payment.paid_at else None,
+        createdAt=payment.created_at.isoformat(),
+    )
+
+
 @router.get("/payments", response_model=AdminPaymentListOut)
 async def get_admin_payments(
     keyword: str = Query(""),
@@ -217,72 +313,7 @@ async def get_admin_payments(
 
     items = []
     for payment, user, party, service in paginated:
-        role = "방장" if party.leader_id == user.id else "멤버"
-
-        base_price = int(payment.base_price) if payment.base_price else int(payment.amount)
-        discount_rate = _extract_discount_rate(payment.discount_reason, service)
-        expected_amount = round(base_price * (1 - discount_rate))
-        amount = expected_amount if discount_rate > 0 else int(payment.amount)
-
-        commission_rate = float(payment.commission_rate or 0)
-        commission_amount = int(payment.commission_amount or 0)
-        applied_leader_discount_rate = (
-            float(service.leader_discount_rate or 0)
-            if payment.discount_reason and "방장 할인" in payment.discount_reason and service
-            else 0.0
-        )
-        applied_referral_discount_rate = (
-            float(service.referral_discount_rate or 0)
-            if payment.discount_reason and "추천인 할인" in payment.discount_reason and service
-            else 0.0
-        )
-
-        quick_match_fee_rate = 0.0
-        if payment.pricing_type == "quick_match":
-            if service and service.quick_match_fee_rate is not None:
-                quick_match_fee_rate = float(service.quick_match_fee_rate or 0)
-            elif service and service.commission_rate is not None:
-                quick_match_fee_rate = max(
-                    commission_rate - float(service.commission_rate or 0),
-                    0.0,
-                )
-
-        base_commission_rate = max(commission_rate - quick_match_fee_rate, 0.0)
-        effective_commission_rate = max(
-            commission_rate
-            - applied_leader_discount_rate
-            - applied_referral_discount_rate,
-            0.0,
-        )
-
-        items.append(
-            AdminPaymentRecordOut(
-                id=str(payment.id),
-                userId=str(user.id),
-                userNickname=user.nickname,
-                userName=user.name,
-                partyId=str(party.id),
-                partyTitle=party.title,
-                serviceName=service.name if service else None,
-                role=role,
-                basePrice=base_price,
-                amount=amount,
-                discountReason=payment.discount_reason,
-                baseCommissionRate=base_commission_rate,
-                commissionRate=commission_rate,
-                effectiveCommissionRate=effective_commission_rate,
-                commissionAmount=commission_amount,
-                appliedLeaderDiscountRate=applied_leader_discount_rate,
-                appliedReferralDiscountRate=applied_referral_discount_rate,
-                paymentMethod=payment.payment_method,
-                status=payment.status,
-                billingMonth=payment.billing_month,
-                pricingType=payment.pricing_type,
-                quickMatchFeeRate=quick_match_fee_rate,
-                paidAt=payment.paid_at.isoformat() if payment.paid_at else None,
-                createdAt=payment.created_at.isoformat(),
-            )
-        )
+        items.append(_build_admin_payment_record(payment, user, party, service))
 
     return AdminPaymentListOut(
         items=items,
@@ -291,3 +322,46 @@ async def get_admin_payments(
         limit=limit,
         totalPages=total_pages,
     )
+
+
+@router.patch("/payments/{payment_id}", response_model=AdminPaymentRecordOut)
+async def update_admin_payment_status(
+    payment_id: str,
+    payload: AdminStatusUpdateIn,
+    admin: AdminContext = Depends(require_admin_payment_permission),
+    db: AsyncSession = Depends(get_db),
+):
+    payment = await db.get(Payment, payment_id)
+    if not payment:
+        raise HTTPException(status_code=404, detail="결제 데이터를 찾을 수 없습니다.")
+
+    next_status = _payment_status_code(payload.status)
+    if next_status not in {"pending", "approved", "rejected"}:
+        raise HTTPException(status_code=400, detail="결제 상태는 대기, 승인, 거절만 변경할 수 있습니다.")
+
+    payment.status = next_status
+    if next_status == "approved":
+        payment.paid_at = payment.paid_at or datetime.now(timezone.utc)
+
+    await _append_activity_log(
+        db,
+        actor_user_id=admin.user.id,
+        action_type="payment_status_updated",
+        description=f"{payment.id} 결제 상태를 {_payment_status_label(next_status)}로 변경",
+        path=f"/api/admin/payments/{payment_id}",
+    )
+    await db.commit()
+
+    stmt = (
+        select(Payment, User, Party, Service)
+        .join(User, Payment.user_id == User.id)
+        .join(Party, Payment.party_id == Party.id)
+        .outerjoin(Service, Party.service_id == Service.id)
+        .where(Payment.id == payment.id)
+    )
+    row = (await db.execute(stmt)).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="결제 데이터를 다시 불러오지 못했습니다.")
+
+    current_payment, user, party, service = row
+    return _build_admin_payment_record(current_payment, user, party, service)
